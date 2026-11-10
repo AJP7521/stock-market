@@ -22,6 +22,7 @@ from backend.indicator_store import add_config, delete_config, list_configs
 from backend.indicators import INDICATOR_TYPES, compute, describe_types, sma_crossover, validate_windows
 from backend.live import LiveHub
 from backend.paper import PaperError, account_state, execute, fill_paper_orders, open_account
+from backend.pnl import history as pnl_history
 from backend.recorder import connect, db_path, now_ms, record
 from backend.replay import connect_readonly, replay, sessions
 from backend.timeframes import MINUTE_MS, aggregate, to_ms
@@ -351,6 +352,16 @@ def paper_account() -> dict:
     conn = _paper_conn()
     try:
         return account_state(conn, PAPER_ACCOUNT)
+    finally:
+        conn.close()
+
+
+@app.get("/api/paper/pnl")
+def paper_pnl(symbol: str | None = None) -> dict:
+    """P&L history rows (fills and completed-candle valuations), oldest first."""
+    conn = _paper_conn()
+    try:
+        return {"account": PAPER_ACCOUNT, "symbol": symbol, "rows": pnl_history(conn, PAPER_ACCOUNT, symbol)}
     finally:
         conn.close()
 

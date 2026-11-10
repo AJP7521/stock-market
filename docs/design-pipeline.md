@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 9C)
+## What exists today (after Prompt 9D)
 
 ```
 browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
@@ -85,7 +85,7 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | Long-only paper account, one execution function, next-price fills, idempotent request ids | `backend/paper.py`, `/api/paper/*` | exists |
 | Paper panel (cash, shares, orders, buy/sell/close/hold/wait, retry) | `frontend/src/PaperPanel.vue` | exists |
 | Test price feed (`TEST_FEED=on`, `POST /api/test/observations`) | `backend/app.py` | exists |
-| P&L history | – | planned (Prompt 9D) |
+| P&L history (weighted average cost; rows on fills and completed-candle valuations; one row per event) | `backend/pnl.py`, `/api/paper/pnl`, `PaperPanel.vue` | exists |
 | Decisions, review, automation | – | planned (Prompts 10–12) |
 | Voice | – | planned (Prompt 13) |
 | SmokeTest command | – | planned (Prompt 14) |
@@ -189,4 +189,16 @@ new observation (live.py, or POST /api/test/observations with TEST_FEED=on) -> r
            for each pending order submitted before this observation was received (oldest first):
              BEGIN; recheck cash/shares; fill at the observation price (zero fees) or reject;
              paper_fills + paper_orders + paper_accounts.cash + paper_positions; COMMIT
+```
+
+## P&L history (Prompt 9D)
+
+```
+observation arrives -> paper.process_observation
+    1. pnl.value_open_positions(symbol, as_of = receipt time)
+         latest completed 1m candle (candles.minute_candles) closed after the last fill?
+         -> pnl_history row "valuation:<symbol>:<candle start>" at the candle close (INSERT OR IGNORE)
+    2. pending orders fill -> in the same transaction: pnl.record_fill(fill)
+         paper_cost_basis (basis, cumulative realized) + pnl_history row "fill:<id>" at the fill price
+GET /api/paper/pnl?symbol= -> PaperPanel "Profit and loss history" table
 ```

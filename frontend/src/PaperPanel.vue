@@ -11,6 +11,7 @@ const quantity = ref(1)
 const message = ref('')
 const messageKind = ref('info')
 const lastRequest = ref(null)
+const pnl = ref([])
 let timer = null
 
 const money = (v) => (v === null || v === undefined ? '—'
@@ -18,9 +19,15 @@ const money = (v) => (v === null || v === undefined ? '—'
 const shares = computed(() => account.value?.positions?.[props.symbol] ?? 0)
 
 async function refresh() {
-  const res = await fetch('/api/paper/account')
+  const [res, pnlRes] = await Promise.all([
+    fetch('/api/paper/account'),
+    fetch(`/api/paper/pnl?${new URLSearchParams({ symbol: props.symbol })}`),
+  ])
   if (res.ok) account.value = await res.json()
+  if (pnlRes.ok) pnl.value = (await pnlRes.json()).rows
 }
+
+const signed = (v) => (v === null || v === undefined ? 'unavailable' : money(v))
 
 async function send(request) {
   lastRequest.value = request
@@ -92,6 +99,32 @@ onBeforeUnmount(() => clearInterval(timer))
       </tbody>
     </table>
     <p v-else class="hint">No orders yet.</p>
+
+    <h3>Profit and loss history · {{ symbol }}</h3>
+    <p class="hint">Weighted average cost, zero fees. A row is added after each fill (valued at the fill price) and
+      when a completed one-minute candle gives a new price for an open position (valued at its close).</p>
+    <table v-if="pnl.length" data-testid="pnl-table">
+      <thead>
+        <tr><th>#</th><th>Event</th><th>Time (UTC)</th><th>Price</th><th>Price source</th><th>Cash</th>
+          <th>Shares</th><th>Avg cost</th><th>Realized</th><th>Unrealized</th><th>Total P&amp;L</th></tr>
+      </thead>
+      <tbody>
+        <tr v-for="r in pnl" :key="r.id" :data-testid="`pnl-row-${r.id}`" :class="r.event">
+          <td>{{ r.id }}</td>
+          <td class="reason">{{ r.description }}</td>
+          <td>{{ r.event_time?.slice(11, 23) }}</td>
+          <td>{{ r.price === null ? 'unavailable' : money(r.price) }}</td>
+          <td class="reason">{{ r.price_source ?? '—' }}</td>
+          <td>{{ money(r.cash) }}</td>
+          <td>{{ r.shares }}</td>
+          <td>{{ r.average_cost === null ? '—' : money(r.average_cost) }}</td>
+          <td>{{ money(r.realized) }}</td>
+          <td :class="{ bad: r.valuation === 'unavailable' }">{{ signed(r.unrealized) }}</td>
+          <td :class="{ bad: r.valuation === 'unavailable' }"><b>{{ signed(r.total) }}</b></td>
+        </tr>
+      </tbody>
+    </table>
+    <p v-else class="hint">No P&amp;L rows yet for {{ symbol }}.</p>
   </section>
 </template>
 
@@ -107,4 +140,6 @@ header, .controls { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-item
 table { border-collapse: collapse; margin-top: 0.5rem; font-variant-numeric: tabular-nums; font-size: 0.8rem; }
 th, td { border: 1px solid #ddd; padding: 0.15rem 0.4rem; text-align: right; }
 td.reason { text-align: left; max-width: 16rem; }
+h3 { font-size: 0.95rem; margin: 0.8rem 0 0.2rem; }
+tr.valuation td { background: #f7f9ff; }
 </style>

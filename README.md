@@ -63,6 +63,7 @@ stock-market/
 |   |-- indicators.py         Indicator interface (types: sma, price_range) + SMA crossover
 |   |-- indicator_store.py    Named indicator instances stored in SQLite
 |   |-- paper.py              Long-only paper account: one execution function, next-price fills
+|   |-- pnl.py                P&L history: weighted average cost, fills and candle valuations
 |   |-- fixtures.py           Labelled test fixtures in a separate SQLite file
 |   |-- candles.py            One-minute candles from stored observations
 |   |-- timeframes.py         5m/15m/1h/1d candles from one-minute candles
@@ -147,6 +148,14 @@ curl "http://127.0.0.1:8000/api/indicators/sma?symbol=AAPL&timeframe=1m&short=5&
 The **Paper account** panel shows cash, shares and order history, with **Buy**, **Sell**, **Close position**, **Hold** and
 **Wait**. An order is filled at the next observed price after you submit it, with zero fees. Hold and wait create no
 order. The account starts with `PAPER_STARTING_CASH` (default 1000) the first time it is opened.
+
+Below the orders, **Profit and loss history** adds a row after every fill and whenever a completed one-minute candle
+gives a new price for an open position. It shows cash, shares, average cost, realized, unrealized and total P&L, and the
+time and source of the price used. The same rows are available as JSON:
+
+```bash
+curl "http://127.0.0.1:8000/api/paper/pnl?symbol=TESTPAPER"
+```
 
 To practise with known prices instead of the live feed, use a disposable database and turn on the test price feed:
 

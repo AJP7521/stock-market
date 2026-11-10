@@ -31,6 +31,8 @@ four decimals are exact. The API converts to dollars for display.
 import sqlite3
 from decimal import Decimal
 
+from backend.pnl import ensure_schema as ensure_pnl_schema
+from backend.pnl import record_fill, value_open_positions
 from backend.recorder import iso, now_ms
 
 MICROS = 1_000_000
@@ -88,6 +90,7 @@ class PaperError(ValueError):
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    ensure_pnl_schema(conn)
 
 
 def to_micros(dollars) -> int:
@@ -197,6 +200,9 @@ def process_observation(conn: sqlite3.Connection, observation: dict) -> list[dic
     symbol = observation.get("ticker") or observation.get("symbol")
     received = observation["first_received_ms"]
     price_micros = to_micros(observation["price"])
+    # A new observation may complete the previous candle: value open positions first (P&L history),
+    # so the valuation row comes before any fill this observation triggers.
+    value_open_positions(conn, symbol, received)
     pending = [r[0] for r in conn.execute(
         "SELECT id FROM paper_orders WHERE symbol = ? AND status = 'pending' AND submitted_ms < ? "
         "ORDER BY submitted_ms, id", (symbol, received))]
@@ -238,6 +244,8 @@ def process_observation(conn: sqlite3.Connection, observation: dict) -> list[dic
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (order_id, account_id, symbol, side, qty, observation["price"], price_micros, observation["id"],
                  observation["source_time_ms"], received, new_cash, new_pos))
+            fill_id = conn.execute("SELECT id FROM paper_fills WHERE order_id = ?", (order_id,)).fetchone()[0]
+            record_fill(conn, fill_id)     # P&L row and cost basis in the same transaction as the fill
         results.append(_order(conn, order_id))
     return results
 

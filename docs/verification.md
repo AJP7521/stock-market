@@ -430,3 +430,47 @@ Prices were supplied with `curl -X POST http://127.0.0.1:8000/api/test/observati
 These match the dashboard row for row. The backend logs show no errors. The browser console showed 502s from the account polling while the backend was restarting, plus the 422s left from the earlier 9A and 9B checks.
 
 **Not yet exercised:** paper orders filled by a **live** Yahoo price (the hook is in `live.py`, but this check used the test feed), and orders placed during replay (the replay UI does not trade; automation comes in Prompt 12).
+
+---
+
+## Prompt 9D · Record realized and unrealized profit and loss (2026-11-10)
+
+### Design (`backend/pnl.py`)
+- **When rows are written:**
+  - **Fill:** a row after each fill, inside the fill's SQLite transaction, valued at the fill price.
+  - **Valuation:** a row when a **completed one-minute candle** gives a new price for an open position, valued at its close. It is checked when the next observation arrives (before that observation's fills), so it is ordered before any fill the observation causes. A candle that closed before the latest fill, or one still forming, does not value.
+- **What a row links to:** account, symbol, event (`fill:<id>` or `valuation:<symbol>:<candle start>`), event time, price, price source and price time.
+- **Weighted average cost:** a buy adds qty × price to the basis. A sale realizes qty × (price − average cost), and the remaining shares keep the average cost. Unrealized = shares × price − basis. Total = cumulative realized + unrealized. Fees are zero.
+- **Money:** integer micro-dollars. When a sale's share of the basis does not divide evenly, it is rounded to the nearest micro-dollar.
+- **Single entry per event:** `pnl_history.event_key` is UNIQUE (`INSERT OR IGNORE`), and the cost basis changes only when a new fill row is inserted. Reprocessing the same event leaves one row.
+- **Unavailable price:** an open position without a usable price gets a row labelled `unavailable`, with unrealized and total NULL. Earlier rows are only ever added to, never changed.
+- **Tables:** `paper_cost_basis` (basis and cumulative realized per account and symbol) and `pnl_history`.
+- **API:** `GET /api/paper/pnl?symbol=`.
+- **Vue:** a "Profit and loss history" table in the paper panel with event, time, price, price source, cash, shares, average cost, realized, unrealized and total. A missing valuation shows "unavailable" in red.
+
+### Unit tests (**test data**, disposable DB, explicit times)
+`python3 -m unittest discover -s backend/tests -t . -v` → **55 tests, OK** (6 new in `test_pnl.py`):
+- **The prompt's five rows,** with price sources (fill #, observation #, "1m candle close 15:00Z / 15:01Z") and average cost 100.
+- **Reprocessing:** `record_fill` again for every fill, every observation replayed, and a later valuation run leave the rows unchanged; 3 fills.
+- **Reopening:** rows are identical after reopening the database.
+- **Partial sale:** buy 3 @ 100 and 1 @ 104 (average 101), sell 2 @ 105 → realized 8, the remaining 2 keep average 101, unrealized 8.
+- **Unavailable:** labelled, with the fill row kept.
+- **Forming candle:** creates no valuation row.
+
+### Browser, real clock, disposable DB (`MARKET_DB=$SCRATCHPAD/pnl-demo.sqlite LIVE_FEED=off TEST_FEED=on`), symbol TESTPNL, start $1,000
+Orders were placed with the paper panel's buttons. Prices were **test data** posted to `/api/test/observations`, timed so each candle closed at the required price:
+- 23:31 — Buy 4; prices 100, then 110.
+- 23:32 — Sell 1; prices 110, then 95.
+- 23:33 — Close; price 105.
+
+| # | Expected (Event / Cash / Shares / Realized / Unrealized / Total) | On screen | SQLite `pnl_history` | Result |
+|---|---|---|---|---|
+| 1 | Buy 4 at $100 / 600 / 4 / 0 / 0 / 0 | buy 4 at 100 · $600.00 · 4 · $0.00 · $0.00 · $0.00 (fill #1, obs #1) | fill · 600.0 · 4 · 0.0 · 0.0 · 0.0 · ok | pass |
+| 2 | Value at $110 / 600 / 4 / 0 / 40 / 40 | value 4 shares at 110 · 23:32:00 · "1m candle close 2026-11-10T23:31:00Z" · $600.00 · 4 · $0.00 · $40.00 · $40.00 | valuation · 110.0 · 600.0 · 4 · 0.0 · 40.0 · 40.0 | pass |
+| 3 | Sell 1 at $110 / 710 / 3 / 10 / 30 / 40 | sell 1 at 110 · $710.00 · 3 · $10.00 · $30.00 · $40.00 (fill #2, obs #3) | fill · 710.0 · 3 · 10.0 · 30.0 · 40.0 | pass |
+| 4 | Value at $95 / 710 / 3 / 10 / −15 / −5 | value 3 shares at 95 · 23:33:00 · "1m candle close 2026-11-10T23:32:00Z" · $710.00 · 3 · $10.00 · −$15.00 · −$5.00 | valuation · 95.0 · 710.0 · 3 · 10.0 · −15.0 · −5.0 | pass |
+| 5 | Close 3 at $105 / 1,025 / 0 / 25 / 0 / 25 | close 3 at 105 · $1,025.00 · 0 · $25.00 · $0.00 · $25.00 (fill #3, obs #5) | fill · 1025.0 · 0 · 25.0 · 0.0 · 25.0 · no position | pass |
+
+- **Before vs after restart:** the backend was restarted and the page reloaded. The screen showed the same five rows, and the SQLite query output was identical before and after (`diff` empty). 5 P&L rows, 3 fills, observations all `source = test`.
+- **Discrepancies:** none. The backend logs show no errors.
+- **Not exercised in the browser:** the `unavailable` valuation, which needs an open position without any usable price. It is covered by a unit test.

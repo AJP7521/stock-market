@@ -1,21 +1,21 @@
 # Current state: 2026-11-10
 
-**Last prompt:** 09C · Paper trading (complete, not committed). Prompts 1–9B are committed (latest `780af57`).
+**Last prompt:** 09D · Record profit and loss (complete, not committed). Prompts 1–9C are committed (latest `1556216`).
 
-## Files created or changed (Prompt 9C)
-- New: `backend/paper.py`, `backend/tests/test_paper.py` (9 tests), `frontend/src/PaperPanel.vue`
-- Updated: `backend/app.py` (`/api/paper/account`, `/api/paper/orders`, `TEST_FEED` + `/api/test/observations`,
-  source label for symbols without observations), `backend/live.py` (live observations fill pending orders),
-  `frontend/src/App.vue` (panel, "TEST price feed on" badge), `README.md`, `docs/design-pipeline.md`, `docs/verification.md`
+## Files created or changed (Prompt 9D)
+- New: `backend/pnl.py`, `backend/tests/test_pnl.py` (6 tests)
+- Updated: `backend/paper.py` (valuations before fills; P&L row in the fill transaction), `backend/app.py`
+  (`/api/paper/pnl`), `frontend/src/PaperPanel.vue` (P&L history table), `README.md`, `docs/design-pipeline.md`,
+  `docs/verification.md`
 
 ## Checks performed
-49/49 unit tests pass. Browser run on a disposable DB with the test feed: buy 4 @ 100 → $600 / 4; sell 1 @ 110 → $710 / 3;
-close @ 105 → $1,025 / 0. A retry returned the original order; a sale from the empty account was rejected with a reason;
-after a backend restart exactly 3 fills remain. SQLite matches the dashboard. Services were stopped.
+55/55 unit tests pass. Browser on the real clock with test prices: the five rows (600/4/0/0/0, 600/4/0/40/40,
+710/3/10/30/40, 710/3/10/−15/−5, 1025/0/25/0/25) match the expected table on screen and in SQLite, before and after a
+backend restart (diff empty). Services were stopped.
 
 ## Outstanding questions
-- The student needs to review and approve the Prompt 9C commit.
-- Not exercised: a fill from a live Yahoo price; trading during replay (Prompt 12).
+- The student needs to review and approve the Prompt 9D commit.
+- The `unavailable` valuation is covered only by a unit test.
 
 ## Next task
-Prompt 09D · P&L history: weighted average cost; realized/unrealized rows after fills and completed-candle valuations.
+Prompt 10 · Decision API: frozen snapshot plus model proposal (needs an OpenAI package and API key: CHECK → TAKE ACTION).
