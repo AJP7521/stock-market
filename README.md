@@ -54,10 +54,11 @@ stock-market/
 |-- AGENTS.md                 Standing instructions for the coding agent
 |-- .gitignore
 |-- backend/                  Python application logic and FastAPI routes
-|   |-- app.py                FastAPI app (GET /api/health, GET /api/history?symbol=&timeframe=&as_of=)
+|   |-- app.py                FastAPI app: /api/health, /api/history, WS /api/ws/candles, /api/live/{symbol}
 |   |-- history.py            CSV loader for one-minute candles
 |   |-- yahoo_stream.py       Yahoo Finance stream receiver (time-limited check)
 |   |-- recorder.py           SQLite recorder for stream observations
+|   |-- live.py               Live Yahoo feed inside FastAPI (records + notifies WebSocket clients)
 |   |-- candles.py            One-minute candles from stored observations
 |   |-- timeframes.py         5m/15m/1h/1d candles from one-minute candles
 |   |-- market_calendar.py    NYSE regular sessions (holidays, early closes, DST)
@@ -106,8 +107,21 @@ Frontend (Vite dev server on http://127.0.0.1:5173, which forwards `/api` to the
 cd frontend && npm run dev
 ```
 
-Open http://127.0.0.1:5173/. The page should show `Backend health: ok` and a candlestick chart of the
-synthetic sample. Hover over a candle to see its date, time (UTC), prices and volume.
+Open http://127.0.0.1:5173/. The page opens on **AAPL, 1-minute**, streaming live from Yahoo Finance during market
+hours. Every update is recorded in `backend/data/market.sqlite`. Use the Interval menu (1m, 5m, 15m, 1h, 1d) to
+switch timeframes, or enter `SAMPLE` and press Load to see the synthetic CSV. The status bar shows the source, the age
+of the latest source observation, the feed state, the browser's own connection to FastAPI, and whether the latest
+candle is still forming. Hover over a candle to see its date, time (UTC), prices and volume.
+
+Test controls for the upstream feed, while a page is watching the symbol:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/live/AAPL/disconnect
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/live/AAPL/connect
+```
 
 Quick checks:
 

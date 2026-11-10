@@ -1,8 +1,9 @@
 <script setup>
 // Candlestick chart with volume bars underneath, drawn with TradingView Lightweight Charts.
+// `rows` sets the whole history; `upsert(row)` updates one candle in place (live updates).
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CandlestickSeries, HistogramSeries, createChart } from 'lightweight-charts'
-import { colors, formatChartTime, toSeriesData } from './chartAdapter.js'
+import { colors, formatChartTime, toBars, toSeriesData } from './chartAdapter.js'
 
 const props = defineProps({
   rows: { type: Array, required: true }, // backend candles: timestamp, open, high, low, close, volume
@@ -15,22 +16,45 @@ const inspected = ref(null) // candle shown in the legend (hovered, or the lates
 let chart
 let candleSeries
 let volumeSeries
-let byTime = new Map()
+let byTime = new Map()     // chart time -> backend row
+let hovering = false
 
 function describe(time) {
   const row = byTime.get(time)
   return row ? { ...row, ...formatChartTime(time) } : null
 }
 
+function latestTime() {
+  return byTime.size ? Math.max(...byTime.keys()) : null
+}
+
+function showLatest() {
+  const t = latestTime()
+  inspected.value = t === null ? null : describe(t)
+}
+
 function render(rows) {
   const { candles, volumes } = toSeriesData(rows)
-  byTime = new Map(candles.map((c, i) => [c.time, { ...c, volume: volumes[i].value }]))
+  byTime = new Map(candles.map((c, i) => [c.time, rows[i]]))
   candleSeries.setData(candles)
   volumeSeries.setData(volumes)
   // autoSize measures the container asynchronously; fit after it has a width.
   requestAnimationFrame(() => chart?.timeScale().fitContent())
-  inspected.value = candles.length ? describe(candles[candles.length - 1].time) : null
+  showLatest()
 }
+
+/** Update one candle and its volume in place, or append the next candle. */
+function upsert(row) {
+  const { candle, volume } = toBars(row)
+  const latest = latestTime()
+  const historical = latest !== null && candle.time < latest   // a late update to an earlier candle
+  candleSeries.update(candle, historical)
+  volumeSeries.update(volume, historical)
+  byTime.set(candle.time, row)
+  if (!hovering) showLatest()
+}
+
+defineExpose({ upsert })
 
 onMounted(() => {
   chart = createChart(container.value, {
@@ -50,8 +74,9 @@ onMounted(() => {
   volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } })
 
   chart.subscribeCrosshairMove((param) => {
-    const latest = props.rows.length ? describe(Math.max(...byTime.keys())) : null
-    inspected.value = param.time !== undefined ? describe(param.time) ?? latest : latest
+    hovering = param.time !== undefined && byTime.has(param.time)
+    if (hovering) inspected.value = describe(param.time)
+    else showLatest()
   })
   render(props.rows)
 })
@@ -72,7 +97,8 @@ onBeforeUnmount(() => chart?.remove())
         H <b data-testid="legend-high">{{ inspected.high }}</b>
         L <b data-testid="legend-low">{{ inspected.low }}</b>
         C <b data-testid="legend-close">{{ inspected.close }}</b>
-        Vol <b data-testid="legend-volume">{{ inspected.volume }}</b> shares
+        Vol <b data-testid="legend-volume">{{ inspected.volume ?? 'unknown' }}</b>
+        <span v-if="inspected.volume !== null && inspected.volume !== undefined">shares</span>
       </span>
     </header>
     <div ref="container" class="chart" data-testid="candle-chart"></div>

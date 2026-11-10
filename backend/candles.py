@@ -26,8 +26,11 @@ Aggregation rules
 5. Volume: Yahoo's day_volume is a running session total. Minute volume =
    the last running total in the minute minus the baseline, where the baseline is
    the last running total *before* the minute in the same trading session
-   (America/New_York calendar date). Volume is None (unknown) when:
+   (America/New_York calendar date), and it must come from the immediately
+   preceding minute. An older baseline would add the shares traded during the gap
+   to this minute. Volume is None (unknown) when:
      - there is no earlier observation in the session (no baseline)
+     - the latest earlier observation is more than one minute before this minute (gap)
      - an observation in the minute lacks day_volume
      - the running total decreases (a session reset); the baseline then restarts
    A known zero (the running total did not change) stays 0, which is different from None.
@@ -81,21 +84,27 @@ def build_minute_candles(observations: list[dict], as_of_ms: int | None = None) 
     candles: list[dict] = []
     current = None
     prev_cum = None          # last running total seen, in source-time order
+    prev_time = None         # source time of that running total
     prev_session = None
 
     for o in rows:
         minute_start = o["source_time_ms"] - o["source_time_ms"] % MINUTE_MS
         session = session_date(o["source_time_ms"])
         if session != prev_session:   # new trading session: no usable baseline
-            prev_cum = None
+            prev_cum = prev_time = None
             prev_session = session
 
         if current is None or current["start"] != minute_start:
             if current:
                 candles.append(_finish(current, as_of_ms))
+            if prev_cum is None:
+                baseline, note = None, "no earlier running total in this session"
+            elif prev_time < minute_start - MINUTE_MS:
+                baseline, note = None, "no running total in the preceding minute (gap in observations)"
+            else:
+                baseline, note = prev_cum, None
             current = {
-                "start": minute_start, "prices": [], "baseline": prev_cum, "last_cum": None,
-                "note": None if prev_cum is not None else "no earlier running total in this session",
+                "start": minute_start, "prices": [], "baseline": baseline, "last_cum": None, "note": note,
                 "last_source": None, "last_received": None,
             }
 
@@ -108,9 +117,9 @@ def build_minute_candles(observations: list[dict], as_of_ms: int | None = None) 
             current["note"] = current["note"] or "an observation has no running volume"
         elif prev_cum is not None and cum < prev_cum:
             current["note"] = "running volume decreased (session total reset)"
-            prev_cum = cum
+            prev_cum, prev_time = cum, o["source_time_ms"]
         else:
-            prev_cum = cum
+            prev_cum, prev_time = cum, o["source_time_ms"]
         if cum is not None:
             current["last_cum"] = cum
 

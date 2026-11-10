@@ -216,3 +216,43 @@ HTTP checks through the Vite proxy (`curl http://127.0.0.1:5173/api/history?...`
 | `timeframe=2m` | HTTP 422, listing the allowed values | pass |
 | `symbol=AAPL&timeframe=1m` (recorded **live** data) | 19:18Z candle, `volume: null`, `volume_known` false | pass |
 | Browser http://127.0.0.1:5173/ | chart still shows the three sample candles; no console errors | pass |
+
+---
+
+## Prompt 8 · Display live updates on the existing chart (2026-11-10)
+
+**What was traced before editing:**
+- Chart: `frontend/src/CandleChart.vue` and `chartAdapter.js`.
+- Yahoo subscription: `backend/yahoo_stream.py`, which uses yfinance `AsyncWebSocket`.
+- Observation → candle: `recorder.record()` → `candles.minute_candles()` → `timeframes.aggregate()`.
+
+**Dependencies:** none installed. uvicorn 0.54 serves WebSockets with the `websockets` 17.4 package that came with yfinance. Lightweight Charts 5.2.1 supports `series.update(bar, historicalUpdate)`.
+
+**Changes:**
+- `backend/live.py` (new): `SymbolFeed` and `LiveHub`. It reuses yfinance `AsyncWebSocket.subscribe()` and its decoder, but runs its own receive loop. yfinance 1.8.0's `listen()` reconnects by reusing the closed socket and would spin on a clean close, so it can't report the feed state. Every message is recorded with `recorder.record()`.
+- `backend/app.py`:
+  - `WS /api/ws/candles?symbol&timeframe` sends `{type: "candle", symbol, interval, candle: {six fields}, status, feed}` for every new observation, and `{type: "feed", …}` every second and on each change.
+  - `GET /api/live/{symbol}` returns feed status.
+  - `POST /api/live/{symbol}/disconnect` and `/connect` are test controls.
+  - Live symbols use as-of "now", so the latest candle shows as forming.
+- `frontend/src/App.vue`:
+  - symbol field (default AAPL) and timeframe selector (default 1m)
+  - a status bar showing symbol, interval, source, age of the last source observation, feed status, Browser ↔ FastAPI connection state, and whether the latest candle is forming or complete
+- `CandleChart.vue`: `upsert()` updates a candle and its volume bar in place, or appends the next candle. Unknown volume is drawn as no bar and shown as "unknown" in the legend.
+- **Fix found during this check (AutoLoop cycle 1):** the first live screen showed 19:28 volume 292,136. The baseline came from the 19:18 capture, so the shares traded during the 10-minute gap were counted in one minute. `candles.py` now requires the baseline to come from the immediately preceding minute, and otherwise reports unknown ("gap in observations"). A new test (`test_volume_unknown_after_gap`) brings the suite to **22 tests, OK**.
+
+### Live checks (Yahoo AAPL, regular session, 2026-11-10 ≈ 19:29 UTC / 14:29 ET), browser at http://127.0.0.1:5173/
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| 1 | Page loads, 1m by default | live feed, forming candle | Feed `live`, Browser ↔ FastAPI `open`, latest candle `forming`, age 4–5 s | pass |
+| 2 | **Follow one Yahoo update from SQLite to the screen** | on-screen 19:29 candle = the same candle computed from SQLite | Last stored record: observation **67**, source **19:29:11Z**, price **348.33**, day_volume 16694660, received 19:29:16.393Z. Screen at 19:29:16.569Z: `2026-11-10 19:29 UTC O 348.355 H 348.355 L 348.33 C 348.33 Vol 7234`. SQL over the same minute: O 348.355, H 348.355, L 348.33, C 348.33, V 7234, 10 observations | **pass (live)** |
+| 3 | Switch to 5m | matching history and live updates, same symbol | 19:25 candle O 348.23 H 348.36 L 348.23 C 348.35, `forming · 2/5 min`, volume unknown (19:28 follows a gap), identical to `/api/history?symbol=AAPL&timeframe=5m` | pass |
+| 4 | **Disconnect upstream** (`POST /api/live/AAPL/disconnect` at 19:29:40Z) with the page open | feed status changes while the browser socket stays open | Feed: `paused (upstream disconnected on request)`; Browser ↔ FastAPI: `open`; age kept growing (11 s); 0 observations recorded while paused | pass |
+| 5 | Reconnect (`POST /api/live/AAPL/connect`, 19:29:51Z) | returns to live | log: connecting 19:29:51.254 → live 19:29:52.389; screen: `live`, age 0 s, new high 348.43 | pass |
+| 6 | Switch to SAMPLE | synthetic data, no live feed; AAPL feed released | Feed `offline (synthetic CSV sample; no live feed)`; 5m 14:30 = 100/105/99/104/3550; `/api/live/AAPL` → `not running` | pass |
+| 7 | Console and backend log | no errors | none | pass |
+
+**Not yet exercised:**
+- **Unrequested drop:** the `disconnected` path, when the upstream drops by itself (network loss, Yahoo closing the connection), is coded with a 5 s retry but was only exercised through the `paused` test control.
+- **`quiet` state:** shown after 30 s without messages, for example after the close. It was not observed.

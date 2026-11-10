@@ -103,6 +103,14 @@ class MinuteCandleTests(unittest.TestCase):
         self.assertIsNone(self.candle_at("15:00", "15:02:00")["candle"]["volume"])
         self.assertEqual(self.candle_at("15:01", "15:02:00")["candle"]["volume"], 3)  # baseline restarts at 5
 
+    def test_volume_unknown_after_gap(self):
+        self.add("14:57:30", 98, 900)      # last running total is two minutes before 15:00
+        self.add("15:00:05", 100, 1004)
+        self.add("15:00:50", 101, 1011)
+        item = self.candle_at("15:00", "15:01:00")
+        self.assertIsNone(item["candle"]["volume"])
+        self.assertIn("gap", item["status"]["volume_note"])
+
     def test_known_zero_volume_differs_from_unknown(self):
         self.add("14:59:59", 99, 1000)
         self.add("15:00:30", 99, 1000)
