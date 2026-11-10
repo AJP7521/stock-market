@@ -60,7 +60,8 @@ stock-market/
 |   |-- recorder.py           SQLite recorder for stream observations
 |   |-- live.py               Live Yahoo feed inside FastAPI (records + notifies WebSocket clients)
 |   |-- replay.py             Read-only replay of recorded observations
-|   |-- indicators.py         SMA short/long and crossover signals
+|   |-- indicators.py         Indicator interface (types: sma, price_range) + SMA crossover
+|   |-- indicator_store.py    Named indicator instances stored in SQLite
 |   |-- fixtures.py           Labelled test fixtures in a separate SQLite file
 |   |-- candles.py            One-minute candles from stored observations
 |   |-- timeframes.py         5m/15m/1h/1d candles from one-minute candles
@@ -72,7 +73,7 @@ stock-market/
 |   |-- package.json          npm manifest (package-lock.json pins exact versions)
 |   |-- vite.config.js        Dev server on 5173, forwards /api to 127.0.0.1:8000
 |   |-- index.html
-|   `-- src/                  main.js, App.vue, CandleChart.vue, chartAdapter.js
+|   `-- src/                  main.js, App.vue, CandleChart.vue, IndicatorPanel.vue, chartAdapter.js
 |-- docs/
 |   |-- design-pipeline.md    File responsibilities and how data moves
 |   `-- verification.md       Repeatable checks and observed results
@@ -138,6 +139,23 @@ the crossovers. The chart draws the lines and marks each crossover with an arrow
 
 ```bash
 curl "http://127.0.0.1:8000/api/indicators/sma?symbol=AAPL&timeframe=1m&short=5&long=20"
+```
+
+### Configurable indicators
+
+The **Indicators** panel lists the indicator types Python provides (simple moving average, rolling price range). Give an
+instance a name and settings and click **Add indicator**. Python validates the settings and stores them in SQLite, so the
+same chart configuration returns when you reload (the URL keeps `?symbol=…&interval=…`). Values appear on the chart, in
+the hover legend and in the table below the chart.
+
+To check the rolling-range fixture (TESTRANGE, labelled test data in its own database):
+
+```bash
+python3 -m backend.fixtures range
+```
+
+```bash
+MARKET_DB=backend/data/test-range.sqlite LIVE_FEED=off python3 -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
 ```
 
 To check the SMA crossover fixture (labelled test data in its own database), write it, start the backend against it

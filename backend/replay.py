@@ -74,12 +74,17 @@ def _sma(series: list[dict], sma: tuple[int, int] | None) -> dict | None:
     return sma_crossover([{**c["candle"], "complete": c["status"]["complete"]} for c in series], *sma)
 
 
+def _candles(series: list[dict]) -> list[dict]:
+    return [{**c["candle"], "complete": c["status"]["complete"]} for c in series]
+
+
 def replay(conn: sqlite3.Connection, symbol: str, start_ms: int, end_ms: int, timeframe: str = "1m",
-           sma: tuple[int, int] | None = None) -> dict:
+           sma: tuple[int, int] | None = None, indicators=None) -> dict:
     """Every arrival in the selection as a replay step, plus the final candles.
 
     With `sma=(short, long)`, each step also carries the SMA points and crossovers
-    computed from only the candles available at that step.
+    computed from only the candles available at that step. `indicators`, if given,
+    is a function candles -> configured indicator values, applied the same way.
     """
     arrivals = _arrivals(conn, symbol, start_ms, end_ms)
     seen: dict[int, dict] = {}           # distinct observations available so far
@@ -104,6 +109,7 @@ def replay(conn: sqlite3.Connection, symbol: str, start_ms: int, end_ms: int, ti
             "candle": item["candle"] if item else None,
             "status": item["status"] if item else None,
             **({"sma": _sma(series, sma)} if sma else {}),
+            **({"indicators": indicators(_candles(series))} if indicators else {}),
         })
     final_as_of = arrivals[-1]["received_at_ms"] if arrivals else None
     final = _series(list(seen.values()), timeframe, final_as_of) if arrivals else []
@@ -117,5 +123,6 @@ def replay(conn: sqlite3.Connection, symbol: str, start_ms: int, end_ms: int, ti
         "empty": not arrivals,
         "steps": steps,
         "final": {"candles": [c["candle"] for c in final], "status": [c["status"] for c in final],
-                  **({"sma": _sma(final, sma)} if sma else {})},
+                  **({"sma": _sma(final, sma)} if sma else {}),
+                  **({"indicators": indicators(_candles(final))} if indicators else {})},
     }

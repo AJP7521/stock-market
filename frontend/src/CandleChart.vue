@@ -3,12 +3,13 @@
 // `rows` sets the whole history; `upsert(row)` updates one candle in place (live updates).
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CandlestickSeries, HistogramSeries, LineSeries, createChart, createSeriesMarkers } from 'lightweight-charts'
-import { colors, formatChartTime, toBars, toSeriesData, toSmaData } from './chartAdapter.js'
+import { colors, formatChartTime, toBars, toIndicatorLines, toSeriesData, toSmaData } from './chartAdapter.js'
 
 const props = defineProps({
   rows: { type: Array, required: true }, // backend candles: timestamp, open, high, low, close, volume
   label: { type: String, default: '' },
   sma: { type: Object, default: null },  // backend SMA result: points, crossovers, windows
+  indicators: { type: Array, default: () => [] },  // configured indicators with their points
 })
 
 const container = ref(null)
@@ -22,11 +23,37 @@ let longSeries
 let markers
 let byTime = new Map()     // chart time -> backend row
 let smaByTime = new Map()  // chart time -> SMA point
+const indicatorSeries = new Map()   // indicator id -> line series
+const indicatorLines = ref([])      // [{id, name, color, byTime}] for the legend
 let hovering = false
 
 function describe(time) {
   const row = byTime.get(time)
-  return row ? { ...row, ...formatChartTime(time), sma: smaByTime.get(time) ?? null } : null
+  if (!row) return null
+  const values = indicatorLines.value.map((l) => ({ id: l.id, name: l.name, color: l.color, value: l.byTime.get(time) ?? null }))
+  return { ...row, ...formatChartTime(time), sma: smaByTime.get(time) ?? null, indicators: values }
+}
+
+/** One line per configured indicator; "separate" ones go in a second pane below the candles. */
+function applyIndicators(list) {
+  const lines = toIndicatorLines(list)
+  const keep = new Set(lines.map((l) => l.id))
+  for (const [id, series] of indicatorSeries) {
+    if (!keep.has(id)) { chart.removeSeries(series); indicatorSeries.delete(id) }
+  }
+  for (const line of lines) {
+    let series = indicatorSeries.get(line.id)
+    if (!series) {
+      series = chart.addSeries(LineSeries, {
+        color: line.color, lineWidth: 2, priceLineVisible: false, lastValueVisible: true,
+        crosshairMarkerVisible: false, title: line.name,
+      }, line.pane === 'separate' ? 1 : 0)
+      indicatorSeries.set(line.id, series)
+    }
+    series.setData(line.data)
+  }
+  indicatorLines.value = lines
+  if (!hovering) showLatest()
 }
 
 /** Draw the SMA lines (gaps during warm-up) and a marker at each crossover. */
@@ -106,10 +133,12 @@ onMounted(() => {
   })
   render(props.rows)
   applySma(props.sma)
+  applyIndicators(props.indicators)
 })
 
 watch(() => props.rows, (rows) => chart && render(rows))
 watch(() => props.sma, (sma) => chart && applySma(sma))
+watch(() => props.indicators, (list) => chart && applyIndicators(list))
 
 onBeforeUnmount(() => chart?.remove())
 </script>
@@ -135,6 +164,10 @@ onBeforeUnmount(() => chart?.remove())
           <b v-if="inspected.sma?.signal" data-testid="legend-signal"
              :class="inspected.sma.signal">{{ inspected.sma.signal === 'up' ? '▲ cross up' : '▼ cross down' }}</b>
         </template>
+        <span v-for="ind in inspected.indicators" :key="ind.id" :style="{ color: ind.color }"
+              :data-testid="`legend-indicator-${ind.name}`">
+          {{ ind.name }} <b>{{ fmt(ind.value) }}</b>
+        </span>
       </span>
     </header>
     <div ref="container" class="chart" data-testid="candle-chart"></div>

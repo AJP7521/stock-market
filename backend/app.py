@@ -5,17 +5,21 @@ Run from the project root:
 """
 
 import asyncio
+import json
 import logging
 import os
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
 
 from backend.candles import iso_ms, minute_candles
 from backend.history import load_candles
-from backend.indicators import sma_crossover, validate_windows
+from backend.indicator_store import add_config, delete_config, list_configs
+from backend.indicators import INDICATOR_TYPES, compute, describe_types, sma_crossover, validate_windows
 from backend.live import LiveHub
 from backend.recorder import connect, db_path, now_ms
 from backend.replay import connect_readonly, replay, sessions
@@ -66,8 +70,12 @@ def candle_series(symbol: str, timeframe: str, as_of_ms: int | None) -> dict:
             as_of_ms = now_ms()
         with connect(db_path()) as conn:
             live = minute_candles(conn, symbol, as_of_ms)
+            sources = {r[0] for r in conn.execute(
+                "SELECT DISTINCT source FROM observations WHERE ticker = ?", (symbol,))}
         minutes = [{**item["candle"], "complete": item["status"]["complete"]} for item in live]
-        source = "Yahoo Finance (recorded in SQLite)"
+        source = ("TEST data (labelled fixture, SQLite)" if sources == {"test"}
+                  else "Yahoo Finance + TEST data (SQLite)" if "test" in sources
+                  else "Yahoo Finance (recorded in SQLite)")
     result = aggregate(minutes, timeframe, as_of_ms)
     return {"source": source, **result}
 
@@ -219,9 +227,22 @@ def replay_session(
     except FileNotFoundError:
         raise HTTPException(404, "no recorded database yet")
     try:
-        return replay(conn, symbol, start_ms, end_ms, timeframe, sma)
+        configs = list_configs_readonly(conn, symbol)
+        return replay(conn, symbol, start_ms, end_ms, timeframe, sma,
+                      indicators=lambda candles: configured_values(configs, candles))
     finally:
         conn.close()
+
+
+def list_configs_readonly(conn, symbol: str) -> list[dict]:
+    """Indicator configs from a read-only connection (an older database may not have the table yet)."""
+    try:
+        rows = conn.execute("SELECT id, symbol, name, type, settings, created_ms FROM indicator_configs "
+                            "WHERE symbol = ? ORDER BY id", (symbol,)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [{"id": r[0], "symbol": r[1], "name": r[2], "type": r[3], "settings": json.loads(r[4]),
+             "created_ms": r[5]} for r in rows]
 
 
 def _check_windows(short: int | None, long: int | None) -> None:
@@ -247,3 +268,63 @@ def sma_indicator(
     result = sma_crossover([{**c["candle"], "complete": c["status"]["complete"]} for c in series["candles"]],
                            short, long)
     return {"symbol": symbol, "timeframe": timeframe, "as_of": as_of, **result}
+
+
+# ---------------------------------------------------------------- configurable indicators (Prompt 9B)
+
+def configured_values(configs: list[dict], candles: list[dict]) -> list[dict]:
+    """Values of each configured indicator, one point per candle (completed candles only)."""
+    return [{**cfg, "pane": INDICATOR_TYPES[cfg["type"]]["pane"], "units": INDICATOR_TYPES[cfg["type"]]["units"],
+             "points": compute(cfg["type"], candles, cfg["settings"])} for cfg in configs]
+
+
+@app.get("/api/indicator-types")
+def indicator_types() -> dict:
+    """Indicator types Vue can offer, with their settings, units, inputs and output."""
+    return {"types": describe_types()}
+
+
+@app.get("/api/indicator-configs")
+def indicator_configs(symbol: str) -> dict:
+    with connect(db_path()) as conn:
+        return {"symbol": symbol, "indicators": list_configs(conn, symbol)}
+
+
+class IndicatorConfigIn(BaseModel):
+    symbol: str = Field(min_length=1, max_length=20)
+    name: str
+    type: str
+    settings: dict = Field(default_factory=dict)
+
+
+@app.post("/api/indicator-configs", status_code=201)
+def create_indicator_config(body: IndicatorConfigIn) -> dict:
+    """Validate and store a named indicator instance; invalid settings return 422 and store nothing."""
+    with connect(db_path()) as conn:
+        try:
+            return add_config(conn, body.symbol, body.name, body.type, body.settings)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+
+
+@app.delete("/api/indicator-configs/{config_id}")
+def remove_indicator_config(config_id: int) -> dict:
+    with connect(db_path()) as conn:
+        if not delete_config(conn, config_id):
+            raise HTTPException(404, f"no indicator with id {config_id}")
+    return {"deleted": config_id}
+
+
+@app.get("/api/indicator-values")
+def indicator_values(
+    symbol: str = SAMPLE_SYMBOL,
+    timeframe: Timeframe = "1m",
+    as_of: str | None = Query(None, description="Only use candles available at this UTC time"),
+) -> dict:
+    """Every configured indicator for the symbol, calculated over its candles at this timeframe."""
+    series = candle_series(symbol, timeframe, _parse_as_of(as_of))
+    candles = [{**c["candle"], "complete": c["status"]["complete"]} for c in series["candles"]]
+    with connect(db_path()) as conn:
+        configs = list_configs(conn, symbol)
+    return {"symbol": symbol, "timeframe": timeframe, "as_of": as_of,
+            "indicators": configured_values(configs, candles)}

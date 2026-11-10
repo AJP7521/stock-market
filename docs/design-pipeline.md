@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 9A)
+## What exists today (after Prompt 9B)
 
 ```
 browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
@@ -80,7 +80,9 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | SMA short/long + crossovers (exact arithmetic, completed candles only); `/api/indicators/sma`; per-step SMA in replay | `backend/indicators.py`, `backend/app.py`, `backend/replay.py` | exists |
 | SMA lines and crossover markers on the chart | `frontend/src/CandleChart.vue`, `chartAdapter.js`, `App.vue` | exists |
 | Labelled test fixtures in a separate DB | `backend/fixtures.py` | exists |
-| Indicator framework, paper account, P&L | – | planned (Prompts 9B–9D) |
+| Indicator interface (`INDICATOR_TYPES`: sma, price_range) and stored named instances | `backend/indicators.py`, `backend/indicator_store.py` | exists |
+| Indicator panel, lines per instance (price pane / second pane), values table | `frontend/src/IndicatorPanel.vue`, `CandleChart.vue`, `App.vue` | exists |
+| Paper account, P&L | – | planned (Prompts 9C–9D) |
 | Decisions, review, automation | – | planned (Prompts 10–12) |
 | Voice | – | planned (Prompt 13) |
 | SmokeTest command | – | planned (Prompt 14) |
@@ -155,3 +157,19 @@ Replay uses the same candle code and availability rules as live, so a late obser
 - **Signal:** only a change of side; below → above is **up**, above → below is **down**.
 - **Precision:** comparisons use exact rationals; floats are produced only for display.
 - **Replay:** each step recomputes from the candles available at that step's receipt time, so an unfinished candle never confirms a crossover.
+
+## Indicator interface (Prompt 9B)
+
+```
+INDICATOR_TYPES[key] = {label, description, units, pane, settings: [schema], compute(candles, settings)}
+        |                                   GET /api/indicator-types  --> IndicatorPanel (type, name, settings)
+        |                                   POST /api/indicator-configs --> validate_settings --> SQLite indicator_configs
+        v
+GET /api/indicator-values: candle_series(symbol, timeframe) --> compute() per stored config
+        --> [{id, name, type, pane, units, points: [{timestamp, value|null}]}] --> CandleChart lines + legend + table
+```
+
+- **Inputs:** completed candles and validated settings.
+- **Output:** one value per candle time, or a warm-up gap (null).
+- **SMA:** shares `_sma_exact` with the 9A crossover.
+- **Adding a type:** write a `compute` function and register it; no Vue change is needed, because the panel builds its settings inputs from the schema.

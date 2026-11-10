@@ -68,4 +68,21 @@ export function toSmaData(sma) {
   return { short: line('short'), long: line('long'), markers, byTime }
 }
 
+const INDICATOR_COLORS = ['#8e24aa', '#00897b', '#6d4c41', '#d81b60', '#3949ab', '#7cb342']
+
+/** Configured indicators from the backend -> one line per indicator (gaps where value is null). */
+export function toIndicatorLines(indicators) {
+  return (indicators ?? []).map((ind, i) => ({
+    id: ind.id,
+    name: ind.name,
+    pane: ind.pane,
+    color: INDICATOR_COLORS[i % INDICATOR_COLORS.length],
+    data: ind.points.map((p) => {
+      const time = toChartTime(p.timestamp)
+      return p.value === null ? { time } : { time, value: p.value }
+    }),
+    byTime: new Map(ind.points.map((p) => [toChartTime(p.timestamp), p.value])),
+  }))
+}
+
 export const colors = { UP, DOWN, SHORT, LONG }

@@ -341,3 +341,39 @@ Replay TESTSMA 15:00:00Z → 15:08:00Z, 1m, SMA Short 2 / Long 3, 1 step per sec
 | 7 | Console and backend log | no errors | none | pass |
 
 Note: without `as_of`, `/api/indicators/sma` for TESTSMA uses the current time. The 15:07 minute (price 30) is then complete and correctly produces a third, upward crossover at 15:07.
+
+---
+
+## Prompt 9B · Create and configure a chart indicator (2026-11-10)
+
+### The indicator interface (`backend/indicators.py`)
+- **Inputs:** completed candles for one symbol and interval (the six fields and `complete`), plus settings validated against the type's schema (`validate_settings`: whole numbers between `minimum` and `maximum`, defaults applied, unknown keys and types rejected).
+- **Units:** declared per type. `sma` is in price (quote currency, the candles' scale); `price_range` is a price difference (quote currency).
+- **Output:** exactly one point per candle, `{timestamp, value}`. `value` is null for a warm-up gap or a forming candle.
+- **Adding a type:** write `compute(candles, settings)` and register it in `INDICATOR_TYPES`. FastAPI lists types at `GET /api/indicator-types`.
+- **SMA reuse:** `sma` uses the same helper (`_sma_exact`) as the Prompt 9A crossover, which now builds both of its averages from it. A test confirms the values are identical.
+- **Rolling price range:** the highest high minus the lowest low of the last N completed candles. Exact arithmetic; drawn in a separate pane below the candles.
+
+### Storage and API
+- **Storage:** `backend/indicator_store.py` keeps the table `indicator_configs(id, symbol, name, type, settings JSON, created_ms)` in the market database (`MARKET_DB`). Names are unique per symbol, and invalid settings are never stored.
+- **Endpoints:** `GET /api/indicator-configs?symbol`, `POST /api/indicator-configs` (201, or 422 with a message), `DELETE /api/indicator-configs/{id}`, `GET /api/indicator-values?symbol&timeframe&as_of`. Replay steps include the configured indicators, computed from the candles available at each step.
+- **Vue:** `IndicatorPanel.vue` handles type choice, name, settings generated from the schema, Add and Remove, and shows errors. The chart draws one line per configuration, in the price pane or a second pane, with values in the hover legend. A table lists the latest candles with each indicator's value. The chart's symbol and interval are kept in the URL (`?symbol=…&interval=…`), so a refresh reopens the same chart.
+- **Source label fix:** the status bar called test-data symbols "Yahoo Finance (recorded in SQLite)". It now reads the `source` column, and TESTRANGE shows "TEST data (labelled fixture, SQLite)".
+
+No packages were installed.
+
+### Unit tests (**test data**)
+`python3 -m unittest discover -s backend/tests -t . -v` → **40 tests, OK** (7 new in `test_indicator_types.py`): rolling range values (windows 1, 2, 3), one point per candle with a forming-candle gap, SMA type equal to the crossover's averages, settings validation (0, −2, 2.5, "3", null, an unknown key, an unknown type), type descriptions, fixture candles, and stored configs surviving a new connection with a window of 0 and a duplicate name rejected.
+
+### Browser, against the **labelled fixture** (`python3 -m backend.fixtures range`; `MARKET_DB=backend/data/test-range.sqlite LIVE_FEED=off`)
+Fixture TESTRANGE: candles 15:00, 15:01, 15:02Z on 2026-11-09 with (high, low) = (12, 9), (15, 10), (13, 11), from 4 test observations each.
+
+| # | Action | Expected | Observed | Result |
+|---|---|---|---|---|
+| 1 | Load TESTRANGE; add "Range 2" (Rolling price range, window 2) and "Range 3" (window 3) | both listed | "Range 2 · Rolling price range (window 2)", "Range 3 · Rolling price range (window 3)" | pass |
+| 2 | Values at the third candle (15:02) | Range 2 = **5**, Range 3 = **6** | legend: `15:02 UTC O 12 H 13 L 11 C 12 … Range 2 5 Range 3 6`; table row 15:02Z: 13 / 11 / 12 / **5** / **6**; 15:01Z: Range 2 = 6, Range 3 —; 15:00Z: — / — | pass |
+| 3 | Refresh the page (`location.reload()` on `?symbol=TESTRANGE&interval=1m`) | both configurations return | the same two indicators listed; values 5 and 6 again | pass |
+| 4 | Add "Range 0" with window 0 | error explained; valid indicators kept | "Not added: Window (candles) must be at least 1, got 0"; list and values unchanged (Range 2, Range 3) | pass |
+| 5 | SQLite after the checks | two rows | `1 TESTRANGE Range 2 price_range {"window": 2}`, `2 TESTRANGE Range 3 price_range {"window": 3}` | pass |
+| 6 | Duplicate name through the API | 422 | "TESTRANGE already has an indicator named 'Range 2'" | pass |
+| 7 | Console and backend log | only the intended 422s | two 422s: the Range 0 attempt, and the Short = 0 check from the 9A session; backend log clean | pass |
