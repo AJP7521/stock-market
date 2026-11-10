@@ -25,9 +25,9 @@ No real money or brokerage account is involved at any stage.
 | Layer | Technology | Status |
 |---|---|---|
 | Backend logic | Python 3.14 (system interpreter, no virtual environment) | available |
-| Transport | FastAPI (HTTP + WebSocket), served by an ASGI server (uvicorn) | **not installed** – Prompt 2 |
+| Transport | FastAPI 0.162.4 (HTTP + WebSocket), served by uvicorn 0.54.0 | installed (`backend/requirements.txt`) |
 | Storage | SQLite via Python's built-in `sqlite3` | available (SQLite 3.50.4) |
-| Frontend | Vue, built with Vite | **not installed** – Prompt 2 |
+| Frontend | Vue 3.5.45, built with Vite 8.3.7 and @vitejs/plugin-vue 6.0.10 | installed (`frontend/package.json`, lockfile) |
 | Charting | TradingView Lightweight Charts | **not installed** – Prompt 4 |
 | Market data | `yfinance` WebSocket client | **not installed** – Prompt 5 |
 | AI provider | OpenAI API (key kept in the backend environment) | **not installed** – Prompt 10 |
@@ -54,7 +54,13 @@ stock-market/
 |-- AGENTS.md                 Standing instructions for the coding agent
 |-- .gitignore
 |-- backend/                  Python application logic and FastAPI routes
+|   |-- app.py                FastAPI app (GET /api/health)
+|   `-- requirements.txt      Pinned Python dependencies
 |-- frontend/                 Vue components, user input, and presentation
+|   |-- package.json          npm manifest (package-lock.json pins exact versions)
+|   |-- vite.config.js        Dev server on 5173, forwards /api to 127.0.0.1:8000
+|   |-- index.html
+|   `-- src/                  main.js, App.vue
 |-- docs/
 |   |-- design-pipeline.md    File responsibilities and how data moves
 |   `-- verification.md       Repeatable checks and observed results
@@ -64,10 +70,53 @@ stock-market/
     `-- current.md            Current project state, written at handoff
 ```
 
-## Run instructions
+## Setup (once)
 
-There is nothing to run yet. Startup, stop and test commands will be added here
-once they have been run and checked (Prompt 2 onward).
+From the project root:
+
+```bash
+python3 -m pip install -r backend/requirements.txt
+```
+
+```bash
+cd frontend && npm install
+```
+
+## Run instructions (tested 2026-11-10)
+
+Start each service in its own terminal, from the project root.
+
+Backend (FastAPI on http://127.0.0.1:8000):
+
+```bash
+python3 -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
+```
+
+Frontend (Vite dev server on http://127.0.0.1:5173, which forwards `/api` to the backend):
+
+```bash
+cd frontend && npm run dev
+```
+
+Open http://127.0.0.1:5173/. The page should show `Backend health: ok`.
+
+Quick checks:
+
+```bash
+curl http://127.0.0.1:8000/api/health
+```
+
+```bash
+curl http://127.0.0.1:5173/api/health
+```
+
+Both should return `{"status":"ok","service":"backend"}`.
+
+Stop: press `Ctrl+C` in each terminal, or stop whatever is listening on the two ports:
+
+```bash
+kill $(lsof -tiTCP:8000 -sTCP:LISTEN) $(lsof -tiTCP:5173 -sTCP:LISTEN)
+```
 
 ## Credentials
 

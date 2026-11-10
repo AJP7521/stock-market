@@ -45,14 +45,20 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 1)
+## What exists today (after Prompt 2)
+
+```
+browser --GET /api/health--> Vite dev server :5173 --proxy /api--> FastAPI :8000
+                                                                     backend/app.py
+browser <-------------- {"status":"ok","service":"backend"} <---------'
+```
 
 | Component | File(s) | Status |
 |---|---|---|
 | Sample one-minute candles | `prompts/data/sample-candles.csv` | exists (3 synthetic rows) |
-| Backend package | `backend/` | folder only |
-| Frontend app | `frontend/` | folder only |
-| FastAPI transport | – | planned (Prompt 2) |
+| FastAPI app, `GET /api/health` | `backend/app.py` | exists |
+| Vue app showing backend health | `frontend/src/App.vue`, `src/main.js`, `index.html` | exists |
+| `/api` proxy (HTTP; `ws: true` ready for WebSockets) | `frontend/vite.config.js` | exists |
 | CSV history endpoint | – | planned (Prompt 3) |
 | Chart | – | planned (Prompt 4) |
 | Yahoo receiver, SQLite store | – | planned (Prompts 5–6) |
