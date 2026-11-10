@@ -57,6 +57,8 @@ stock-market/
 |   |-- app.py                FastAPI app (GET /api/health, GET /api/history)
 |   |-- history.py            CSV loader for one-minute candles
 |   |-- yahoo_stream.py       Yahoo Finance stream receiver (time-limited check)
+|   |-- recorder.py           SQLite recorder for stream observations
+|   |-- data/market.sqlite    Local database (created by init; not in Git)
 |   `-- requirements.txt      Pinned Python dependencies
 |-- frontend/                 Vue components, user input, and presentation
 |   |-- package.json          npm manifest (package-lock.json pins exact versions)
@@ -126,6 +128,29 @@ Live Yahoo Finance check (no login; prints the first update, then disconnects, o
 ```bash
 python3 -m backend.yahoo_stream AAPL --timeout 60
 ```
+
+## Market database (SQLite)
+
+Path: `backend/data/market.sqlite` by default. Override it with `--db PATH` or the `MARKET_DB` environment variable.
+
+Initialize (creates the file and tables; safe to rerun):
+
+```bash
+python3 -m backend.recorder init
+```
+
+Record live observations for a fixed time, then inspect them:
+
+```bash
+python3 -m backend.recorder record AAPL --seconds 30
+```
+
+```bash
+python3 -m backend.recorder show --ticker AAPL
+```
+
+`observations` holds one row per distinct message, and `receipts` logs every arrival, including exact repeats.
+Count `observations` to avoid counting a repeat twice.
 
 Stop: press `Ctrl+C` in each terminal, or stop whatever is listening on the two ports:
 

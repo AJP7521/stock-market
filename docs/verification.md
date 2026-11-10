@@ -118,3 +118,39 @@ One received update (**live Yahoo data**, not test data):
 **Format:** int64 fields arrive as **strings** (`MessageToDict` behaviour) and must be converted to integers before storage or arithmetic.
 
 Still to verify: how the stream behaves outside the regular session, such as `market_hours` values and the gaps between messages.
+
+---
+
+## Prompt 6 · Record market observations in SQLite (2026-11-10)
+
+Recorder: `backend/recorder.py`, using Python's built-in `sqlite3` (library SQLite 3.50.4). No packages were installed. The database is `backend/data/market.sqlite` (WAL mode), which Git ignores along with its `-wal`/`-shm` files. Override it with `--db` or `MARKET_DB`.
+
+### How messages are classified
+- **Exact repeat:** the same ticker and identical decoded content, matched by SHA-256 of the canonical JSON. No new observation is created. A receipt row with `is_repeat = 1` is added, and `receipt_count` goes up.
+- **Changed message with the same source time:** stored as a **new** observation, and earlier rows are never updated. Yahoo's PricingData has no correction or sequence field, and `time` has one-second resolution, so the feed cannot establish a correction. Both rows are kept with `revises_id = NULL`. A caller that *can* identify a revision passes `revises_id`, and the earlier row stays unchanged.
+- **Late arrivals:** `source_time_ms` (Yahoo's time) and `receipts.seq` / `received_at_ms` (the backend's arrival order) are stored separately.
+- **Avoiding double counting:** read `observations` (distinct contents), not `receipts` (the arrival log).
+
+### A. Disposable database, **constructed test data** (`source = 'test'`)
+Database: `$SCRATCHPAD/test-recorder.sqlite`, created fresh and outside the project.
+
+| # | Input | Expected | Observed | Result |
+|---|---|---|---|---|
+| 1 | AAPL 348.01 @ 19:16:02.000Z, received .453 | new observation | obs 1, seq 1, `is_repeat` false | pass |
+| 2 | the identical message again, received .900 | repeat; no new observation | obs 1, seq 2, `is_repeat` true; `receipt_count` = 2 | pass |
+| 3 | 348.05 (day_volume 16325114) with the **same** source time | new, separate observation | obs 2, seq 3; obs 1 unchanged | pass |
+| 4 | Counts | 3 receipts, 2 distinct observations | `count(receipts)` = 3, `count(observations)` = 2 | pass |
+| 5 | Late message with source 19:16:01, arriving after the others | ordered first by source time; last by arrival | obs 3, seq 4; `observations()` lists it first | pass |
+| 6 | Identified revision of obs 2 (`revises_id = 2`) | new row linked to obs 2; obs 2 kept | obs 4 with `revises_id` 2; obs 2 still 348.05 | pass |
+| 7 | Reopen: a new Python process (`python3 -m backend.recorder --db … show`) and the `sqlite3` CLI | same rows | identical rows, hashes and receipt order | pass |
+
+### B. Project database, **live Yahoo data**
+Commands: `python3 -m backend.recorder init`, then `python3 -m backend.recorder record AAPL --seconds 30` (14:18 ET).
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| 8 | Live capture | messages stored | 30 messages: 30 new, 0 repeats; connected | **pass (live)** |
+| 9 | Reopen in a new process (`show`, `sqlite3`) | the same 30 rows | 30 observations (19:18:19Z to 19:18:47Z, 348.165 to 348.2599), 30 receipts | pass |
+| 10 | Shared source seconds | distinct messages kept | 6 source seconds have 2–5 distinct observations each (e.g. 19:18:32 has 5), all with `revises_id` NULL | pass; confirms the "retain both" rule |
+
+Note: the restart check used fresh processes, because the recorder is not yet part of the FastAPI app. FastAPI integration starts with Prompt 8.

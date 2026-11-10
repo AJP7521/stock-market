@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 5)
+## What exists today (after Prompt 6)
 
 ```
 browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
@@ -67,7 +67,7 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | Candlestick + volume chart with an inspection legend (Lightweight Charts 5.2.1) | `frontend/src/CandleChart.vue` | exists |
 | Chart adapter: UTC ISO timestamp → UTCTimestamp seconds, the same time for both series | `frontend/src/chartAdapter.js` | exists |
 | Yahoo stream receiver (yfinance `AsyncWebSocket`; time-limited check; not yet wired into FastAPI) | `backend/yahoo_stream.py` | exists |
-| SQLite observation store | – | planned (Prompt 6) |
+| SQLite observation store: `observations` (distinct contents) + `receipts` (arrival log) | `backend/recorder.py`, `backend/data/market.sqlite` | exists (CLI `record`; not yet run inside FastAPI) |
 | Candle building and timeframes | – | planned (Prompts 7, 7A) |
 | Live chart updates, replay | – | planned (Prompts 8–9) |
 | Indicators, paper account, P&L | – | planned (Prompts 9A–9D) |
