@@ -58,6 +58,8 @@ stock-market/
 |   |-- history.py            CSV loader for one-minute candles
 |   |-- yahoo_stream.py       Yahoo Finance stream receiver (time-limited check)
 |   |-- recorder.py           SQLite recorder for stream observations
+|   |-- candles.py            One-minute candles from stored observations
+|   |-- tests/                unittest checks (see Tests below)
 |   |-- data/market.sqlite    Local database (created by init; not in Git)
 |   `-- requirements.txt      Pinned Python dependencies
 |-- frontend/                 Vue components, user input, and presentation
@@ -151,6 +153,18 @@ python3 -m backend.recorder show --ticker AAPL
 
 `observations` holds one row per distinct message, and `receipts` logs every arrival, including exact repeats.
 Count `observations` to avoid counting a repeat twice.
+
+Build one-minute candles from the stored observations (optionally as of a given UTC time):
+
+```bash
+python3 -m backend.candles AAPL
+```
+
+## Tests
+
+```bash
+python3 -m unittest discover -s backend/tests -t . -v
+```
 
 Stop: press `Ctrl+C` in each terminal, or stop whatever is listening on the two ports:
 

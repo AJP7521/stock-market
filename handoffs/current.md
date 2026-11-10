@@ -1,22 +1,21 @@
 # Current state: 2026-11-10
 
-**Last prompt:** 06 · Record observations in SQLite (complete, not committed). Prompts 1–5 are committed (latest `a5eecb0`).
+**Last prompt:** 07 · Form one-minute candles from observations (complete, not committed). Prompts 1–6 are committed (latest `538be4d`).
 
-## Files created or changed (Prompt 6)
-- New: `backend/recorder.py` (schema, `record()`, `observations()`, `receipts()`, `record_stream()`, CLI `init`/`record`/`show`)
-- Updated: `.gitignore` (SQLite `-wal`/`-shm` files), `README.md` (database path and commands), `docs/design-pipeline.md`,
-  `docs/verification.md`
-- Local, not in Git: `backend/data/market.sqlite` with 30 live AAPL observations (19:18:19–19:18:47Z)
+## Files created or changed (Prompt 7)
+- New: `backend/candles.py` (as-of-aware one-minute candle builder and CLI), `backend/tests/__init__.py`,
+  `backend/tests/test_candles.py` (7 unittest cases with test data)
+- Updated: `README.md` (candle and test commands), `docs/design-pipeline.md` (aggregation rules), `docs/verification.md`
 
 ## Checks performed
-Disposable test DB: an exact repeat leaves 1 observation with 2 receipts; a changed message at the same source time becomes
-a separate row; a late arrival sorts by source time; an identified revision links to the earlier row without changing it.
-A new process and the sqlite3 CLI read back identical rows. The live 30 s capture stored 30 messages, and 6 source seconds
-have several distinct messages.
+All 7 tests pass. The prompt's 15:00 candle is 100/103/100/101/11 after the minute ends, and 100/103/100/103/9 while
+forming. A late middle observation restores the same final values. Corrections, unknown volume (no baseline, reset,
+new session) and a known zero are all covered. The live AAPL capture builds one 19:18 candle with unknown volume
+(no baseline).
 
 ## Outstanding questions
-- The student needs to review and approve the Prompt 6 commit.
-- The recorder runs from the CLI. Running it continuously inside FastAPI is part of Prompt 8.
+- The student needs to review and approve the Prompt 7 commit.
+- A live check of an unbroken capture across several minutes is still pending (live capture so far covers 28 s).
 
 ## Next task
-Prompt 07 · Form one-minute candles from stored observations (difference day_volume for per-minute volume).
+Prompt 07A · Derive 5m/15m/1h/daily candles from the one-minute data, aligned to the regular session (exchange calendar).

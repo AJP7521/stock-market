@@ -154,3 +154,24 @@ Commands: `python3 -m backend.recorder init`, then `python3 -m backend.recorder 
 | 10 | Shared source seconds | distinct messages kept | 6 source seconds have 2–5 distinct observations each (e.g. 19:18:32 has 5), all with `revises_id` NULL | pass; confirms the "retain both" rule |
 
 Note: the restart check used fresh processes, because the recorder is not yet part of the FastAPI app. FastAPI integration starts with Prompt 8.
+
+---
+
+## Prompt 7 · Form candles from saved observations (2026-11-10)
+
+Code: `backend/candles.py` (`build_minute_candles`, `minute_candles`, CLI `python3 -m backend.candles AAPL [--as-of ISO]`). Tests: `backend/tests/test_candles.py`, which uses stdlib `unittest` and **constructed test data** (ticker `TEST`, `source='test'`) in a temporary SQLite file that is deleted after each test. Aggregation rules are written in the `backend/candles.py` docstring and in `docs/design-pipeline.md`.
+
+Command: `python3 -m unittest backend.tests.test_candles -v` → **7 tests, OK** (0.012 s).
+
+| # | Test | Expected | Observed | Result |
+|---|---|---|---|---|
+| 1 | Prompt rows; as-of 15:00:30 (before the minute ends) | forming candle: 100 / 103 / 100 / 103, volume 1009 − 1000 = 9, `complete` false | as expected | pass |
+| 2 | Same rows; as-of 15:01:00 (after the minute ends) | **15:00:00Z: open 100, high 103, low 100, close 101, volume 11**, `complete` true, 3 observations, exactly six fields | as expected | pass |
+| 3 | Middle observation (15:00:20, 103) received late at 15:01:10 | as-of 15:01:05: high 101, otherwise the same; as-of 15:01:15: back to 100 / 103 / 100 / 101 / 11 | as expected; `last_received_time` 15:01:10.300Z | pass |
+| 4 | Identified correction (`revises_id`) of the 103 price to 102, received 15:01:20 | high 103 before the correction is available, 102 after | as expected | pass |
+| 5 | No observation before 15:00 in the session | volume `None` ("no earlier running total"); prices still formed | as expected | pass |
+| 6 | Running total drops 1004 → 5 (reset) | 15:00 volume `None`; 15:01 volume 8 − 5 = 3 (baseline restarts) | as expected | pass |
+| 7 | Running total unchanged (1000 → 1000) | volume **0**, known (not `None`) | as expected | pass |
+| 8 | Next trading session (Nov 10) after a Nov 9 observation | first minute's volume `None` (no baseline across sessions) | as expected | pass |
+
+**Live-data spot check** (the 30 live AAPL observations from Prompt 6): `python3 -m backend.candles AAPL` → `2026-11-10T19:18:00Z O 348.255 H 348.2599 L 348.165 C 348.23 V None`, complete, n = 30. Volume is correctly unknown, because the capture began mid-session with no earlier running total. The first minute of every capture will show unknown volume.

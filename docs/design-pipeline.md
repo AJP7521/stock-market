@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 6)
+## What exists today (after Prompt 7)
 
 ```
 browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
@@ -68,7 +68,8 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | Chart adapter: UTC ISO timestamp → UTCTimestamp seconds, the same time for both series | `frontend/src/chartAdapter.js` | exists |
 | Yahoo stream receiver (yfinance `AsyncWebSocket`; time-limited check; not yet wired into FastAPI) | `backend/yahoo_stream.py` | exists |
 | SQLite observation store: `observations` (distinct contents) + `receipts` (arrival log) | `backend/recorder.py`, `backend/data/market.sqlite` | exists (CLI `record`; not yet run inside FastAPI) |
-| Candle building and timeframes | – | planned (Prompts 7, 7A) |
+| One-minute candle builder from observations (as-of aware) | `backend/candles.py`, tests in `backend/tests/test_candles.py` | exists (not yet served over HTTP) |
+| Larger timeframes | – | planned (Prompt 7A) |
 | Live chart updates, replay | – | planned (Prompts 8–9) |
 | Indicators, paper account, P&L | – | planned (Prompts 9A–9D) |
 | Decisions, review, automation | – | planned (Prompts 10–12) |
@@ -82,3 +83,13 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 - `frontend/`: user input, chart rendering, chart capture, and presentation of
   values supplied by the backend. It does no trading or indicator maths.
 - `docs/verification.md`: every check run, with expected and observed results.
+
+## One-minute candle aggregation rules (Prompt 7)
+
+1. **Availability:** use an observation only if it was received by the as-of time and its source time is not after it. Live use passes now; replay passes the displayed time.
+2. **Corrections:** an identified revision (`revises_id`) replaces the row it revises once it is available. Distinct messages sharing a source time are all used.
+3. **Order within a minute:** source time, then first arrival (observation id). A late observation is placed by its source time.
+4. **Prices:** open is the first, high the maximum, low the minimum, close the last.
+5. **Volume:** the last running total (`day_volume`) in the minute minus the last running total before the minute in the same trading session (America/New_York date). It is **unknown (None)** when there is no baseline, an observation lacks a running total, or the running total decreases (a reset; the baseline restarts). A known 0 stays 0.
+6. **Status lives outside the six fields:** `complete` (the as-of time has reached the end of the minute), `observation_count`, `volume_known`, `volume_note`, `last_source_time`, `last_received_time`.
+7. **Recalculation:** candles are recomputed from the store, so late or corrected observations update the affected candle on the next calculation, even after the minute has completed.
