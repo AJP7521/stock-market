@@ -2,12 +2,13 @@
 // Candlestick chart with volume bars underneath, drawn with TradingView Lightweight Charts.
 // `rows` sets the whole history; `upsert(row)` updates one candle in place (live updates).
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { CandlestickSeries, HistogramSeries, createChart } from 'lightweight-charts'
-import { colors, formatChartTime, toBars, toSeriesData } from './chartAdapter.js'
+import { CandlestickSeries, HistogramSeries, LineSeries, createChart, createSeriesMarkers } from 'lightweight-charts'
+import { colors, formatChartTime, toBars, toSeriesData, toSmaData } from './chartAdapter.js'
 
 const props = defineProps({
   rows: { type: Array, required: true }, // backend candles: timestamp, open, high, low, close, volume
   label: { type: String, default: '' },
+  sma: { type: Object, default: null },  // backend SMA result: points, crossovers, windows
 })
 
 const container = ref(null)
@@ -16,12 +17,26 @@ const inspected = ref(null) // candle shown in the legend (hovered, or the lates
 let chart
 let candleSeries
 let volumeSeries
+let shortSeries
+let longSeries
+let markers
 let byTime = new Map()     // chart time -> backend row
+let smaByTime = new Map()  // chart time -> SMA point
 let hovering = false
 
 function describe(time) {
   const row = byTime.get(time)
-  return row ? { ...row, ...formatChartTime(time) } : null
+  return row ? { ...row, ...formatChartTime(time), sma: smaByTime.get(time) ?? null } : null
+}
+
+/** Draw the SMA lines (gaps during warm-up) and a marker at each crossover. */
+function applySma(sma) {
+  const { short, long, markers: m, byTime: points } = toSmaData(sma)
+  shortSeries.setData(short)
+  longSeries.setData(long)
+  markers.setMarkers(m)
+  smaByTime = points
+  if (!hovering) showLatest()
 }
 
 function latestTime() {
@@ -58,6 +73,9 @@ function upsert(row) {
 
 defineExpose({ upsert })
 
+// Display only: values were compared at full precision in Python.
+const fmt = (v) => (v === null || v === undefined ? '—' : Number(v.toFixed(4)).toString())
+
 onMounted(() => {
   chart = createChart(container.value, {
     autoSize: true,
@@ -75,15 +93,23 @@ onMounted(() => {
   volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '' })
   volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } })
 
+  // SMA lines share the price scale with the candles; crossovers are markers on the candles.
+  const lineOptions = { lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }
+  shortSeries = chart.addSeries(LineSeries, { ...lineOptions, color: colors.SHORT })
+  longSeries = chart.addSeries(LineSeries, { ...lineOptions, color: colors.LONG })
+  markers = createSeriesMarkers(candleSeries, [])
+
   chart.subscribeCrosshairMove((param) => {
     hovering = param.time !== undefined && byTime.has(param.time)
     if (hovering) inspected.value = describe(param.time)
     else showLatest()
   })
   render(props.rows)
+  applySma(props.sma)
 })
 
 watch(() => props.rows, (rows) => chart && render(rows))
+watch(() => props.sma, (sma) => chart && applySma(sma))
 
 onBeforeUnmount(() => chart?.remove())
 </script>
@@ -101,6 +127,14 @@ onBeforeUnmount(() => chart?.remove())
         C <b data-testid="legend-close">{{ inspected.close }}</b>
         Vol <b data-testid="legend-volume">{{ inspected.volume ?? 'unknown' }}</b>
         <span v-if="inspected.volume !== null && inspected.volume !== undefined">shares</span>
+        <template v-if="sma">
+          <span class="sma-short">SMA{{ sma.short_window }}
+            <b data-testid="legend-sma-short">{{ fmt(inspected.sma?.short) }}</b></span>
+          <span class="sma-long">SMA{{ sma.long_window }}
+            <b data-testid="legend-sma-long">{{ fmt(inspected.sma?.long) }}</b></span>
+          <b v-if="inspected.sma?.signal" data-testid="legend-signal"
+             :class="inspected.sma.signal">{{ inspected.sma.signal === 'up' ? '▲ cross up' : '▼ cross down' }}</b>
+        </template>
       </span>
     </header>
     <div ref="container" class="chart" data-testid="candle-chart"></div>
@@ -118,5 +152,9 @@ onBeforeUnmount(() => chart?.remove())
 header { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: baseline; margin-bottom: 0.5rem; }
 .legend { display: flex; flex-wrap: wrap; gap: 0.4rem; font-variant-numeric: tabular-nums; }
 .chart { height: 400px; border: 1px solid #ddd; }
+.sma-short { color: #2962ff; }
+.sma-long { color: #ff9800; }
+.up { color: #1b7f5a; }
+.down { color: #c62828; }
 footer { font-size: 0.8rem; color: #555; margin-top: 0.4rem; }
 </style>

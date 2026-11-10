@@ -1,21 +1,23 @@
 # Current state: 2026-11-10
 
-**Last prompt:** 09 · Replay recorded observations (complete, not committed). Prompts 1–8 are committed (latest `370ef9a`).
+**Last prompt:** 09A · Calculate moving averages (complete, not committed). Prompts 1–9 are committed (latest `5e95ebc`).
 
-## Files created or changed (Prompt 9)
-- New: `backend/replay.py` (read-only replay), `backend/tests/test_replay.py` (5 tests)
-- Updated: `backend/app.py` (`/api/replay`, `/api/replay/sessions`, `LIVE_FEED=off`, `live_feed` in health),
-  `frontend/src/App.vue` (Live/Replay modes), `frontend/src/CandleChart.vue` (fit on new candle), `README.md`,
-  `docs/design-pipeline.md`, `docs/verification.md`
+## Files created or changed (Prompt 9A)
+- New: `backend/indicators.py`, `backend/fixtures.py`, `backend/tests/test_indicators.py` (6 tests)
+- Updated: `backend/app.py` (`/api/indicators/sma`, SMA windows on `/api/replay`), `backend/replay.py` (per-step SMA),
+  `frontend/src/App.vue` (SMA controls), `frontend/src/CandleChart.vue` (lines, markers, legend), `frontend/src/chartAdapter.js`
+  (`toSmaData`), `README.md`, `docs/design-pipeline.md`, `docs/verification.md`
+- Local, not in Git: `backend/data/test-sma.sqlite` (TESTSMA fixture; recreate with `python3 -m backend.fixtures sma`)
 
 ## Checks performed
-27/27 unit tests pass. With LIVE_FEED=off, a browser replay of AAPL 19:18–19:31Z (115 recorded live observations) showed
-19:29 close 348.42 and volume 20591, matching SQLite. A second run was identical (API hashes equal), stored counts stayed
-115/115 and the DB hash was unchanged. An empty selection shows a message. Services were stopped.
+33/33 unit tests pass. The hand calculation (13,10,7,13,19,7,1; windows 2/3) matches in a full run, in one-candle-at-a-time
+runs and in replay steps. A forming candle never signals, and exact arithmetic avoids a float false signal. In the browser
+(fixture DB, live feed off) the replay shows two markers, up 15:04Z and down 15:06Z, and the hover values match. Invalid
+windows show readable errors. Services were stopped.
 
 ## Outstanding questions
-- The student needs to review and approve the Prompt 9 commit.
-- Late arrivals, revisions and repeats in replay are verified only with test data; the real capture has none.
+- The student needs to review and approve the Prompt 9A commit.
+- SMA on live AAPL was not checked in the browser this time (market data path unchanged; same endpoint).
 
 ## Next task
-Prompt 09A · Two simple moving averages with crossover markers (Python calculates, Vue draws).
+Prompt 09B · Indicator framework: add types in Python, named instances from Vue, rolling price range, settings in SQLite.

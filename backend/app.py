@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 
 from backend.candles import iso_ms, minute_candles
 from backend.history import load_candles
+from backend.indicators import sma_crossover, validate_windows
 from backend.live import LiveHub
 from backend.recorder import connect, db_path, now_ms
 from backend.replay import connect_readonly, replay, sessions
@@ -202,16 +203,47 @@ def replay_session(
     start: str = Query(..., description="UTC start of the source-time range, inclusive"),
     end: str = Query(..., description="UTC end of the source-time range, exclusive"),
     timeframe: Timeframe = "1m",
+    short: int | None = Query(None, description="Short SMA window (with long)"),
+    long: int | None = Query(None, description="Long SMA window (with short)"),
 ) -> dict:
     """Replay steps for one symbol and time range, computed read-only from SQLite."""
     start_ms, end_ms = _parse_as_of(start), _parse_as_of(end)
     if end_ms <= start_ms:
         raise HTTPException(422, "end must be after start")
+    sma = None
+    if short is not None or long is not None:
+        _check_windows(short, long)
+        sma = (short, long)
     try:
         conn = connect_readonly(db_path())
     except FileNotFoundError:
         raise HTTPException(404, "no recorded database yet")
     try:
-        return replay(conn, symbol, start_ms, end_ms, timeframe)
+        return replay(conn, symbol, start_ms, end_ms, timeframe, sma)
     finally:
         conn.close()
+
+
+def _check_windows(short: int | None, long: int | None) -> None:
+    if short is None or long is None:
+        raise HTTPException(422, "give both short and long SMA windows")
+    try:
+        validate_windows(short, long)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.get("/api/indicators/sma")
+def sma_indicator(
+    symbol: str = SAMPLE_SYMBOL,
+    timeframe: Timeframe = "1m",
+    short: int = Query(..., description="Short window: positive whole number, smaller than long"),
+    long: int = Query(..., description="Long window: positive whole number"),
+    as_of: str | None = Query(None, description="Only use candles available at this UTC time"),
+) -> dict:
+    """Short and long SMAs of completed closes, with crossover signals (calculated in Python)."""
+    _check_windows(short, long)
+    series = candle_series(symbol, timeframe, _parse_as_of(as_of))
+    result = sma_crossover([{**c["candle"], "complete": c["status"]["complete"]} for c in series["candles"]],
+                           short, long)
+    return {"symbol": symbol, "timeframe": timeframe, "as_of": as_of, **result}

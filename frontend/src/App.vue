@@ -21,6 +21,14 @@ const nowMs = ref(Date.now())
 const chartRef = ref(null)
 const chartKey = ref(0)
 
+// Simple moving averages (calculated in Python; drawn here)
+const smaOn = ref(true)
+const smaShort = ref(5)
+const smaLong = ref(20)
+const sma = ref(null)               // response of /api/indicators/sma, or the current replay step's sma
+const smaError = ref('')
+let smaTimer = null
+
 // Replay state
 const sessions = ref([])
 const replaySymbol = ref('')
@@ -61,6 +69,42 @@ async function loadHistory(gen) {
   source.value = body.source
   latestStatus.value = body.status.at(-1) ?? null
   chartKey.value++
+  await fetchSma(gen)
+}
+
+function smaParams() {
+  return smaOn.value ? { short: String(smaShort.value), long: String(smaLong.value) } : null
+}
+
+function smaProblem(body) {
+  return typeof body.detail === 'string' ? body.detail
+    : (body.detail ?? []).map((d) => `${d.loc?.at(-1)}: ${d.msg}`).join('; ')
+}
+
+async function fetchSma(gen = generation) {
+  const params = smaParams()
+  if (!params) { sma.value = null; smaError.value = ''; return }
+  const q = new URLSearchParams({ symbol: symbol.value, timeframe: timeframe.value, ...params })
+  const res = await fetch(`/api/indicators/sma?${q}`)
+  const body = await res.json()
+  if (gen !== generation) return
+  if (!res.ok) {
+    smaError.value = `SMA settings rejected: ${smaProblem(body)}`   // keep the last valid lines
+    return
+  }
+  smaError.value = ''
+  sma.value = body
+}
+
+// Live candles arrive about once a second; recalculate the SMAs at most once a second.
+function scheduleSma() {
+  if (smaTimer) return
+  smaTimer = setTimeout(() => { smaTimer = null; fetchSma() }, 1000)
+}
+
+function applySmaSettings() {
+  if (mode.value === 'live') fetchSma()
+  else if (replay.value || replayMessage.value) startReplay()
 }
 
 function openSocket(gen) {
@@ -78,7 +122,10 @@ function openSocket(gen) {
     const msg = JSON.parse(event.data)
     if (msg.symbol !== symbol.value || msg.interval !== timeframe.value) return
     feed.value = msg.feed
-    if (msg.type === 'candle') applyCandle(msg.candle, msg.status)
+    if (msg.type === 'candle') {
+      applyCandle(msg.candle, msg.status)
+      scheduleSma()
+    }
   }
 }
 
@@ -154,15 +201,16 @@ async function startReplay() {
   replayIndex.value = 0
   candles.value = []
   latestStatus.value = null
+  sma.value = null
   chartKey.value++
   const q = new URLSearchParams({
     symbol: replaySymbol.value.trim().toUpperCase(), start: replayStart.value, end: replayEnd.value,
-    timeframe: timeframe.value,
+    timeframe: timeframe.value, ...(smaParams() ?? {}),
   })
   const res = await fetch(`/api/replay?${q}`)
   const body = await res.json()
   if (!res.ok) {
-    replayMessage.value = `Replay request failed: ${typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)}`
+    replayMessage.value = `Replay request failed: ${smaProblem(body)}`
     return
   }
   symbol.value = body.symbol
@@ -181,6 +229,7 @@ function stepReplay() {
   if (!r || replayIndex.value >= r.steps.length) return stopReplay()
   const step = r.steps[replayIndex.value]
   if (step.candle) applyCandle(step.candle, step.status)
+  if (step.sma) sma.value = step.sma        // only candles available at this step
   replayIndex.value++
   if (replayIndex.value >= r.steps.length) stopReplay()
 }
@@ -230,6 +279,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   clearInterval(clock)
+  clearTimeout(smaTimer)
   stopReplay()
   closeSocket()
 })
@@ -257,6 +307,18 @@ onBeforeUnmount(() => {
         </select>
       </label>
     </div>
+
+    <form class="controls" data-testid="sma-form" @submit.prevent="applySmaSettings">
+      <label><input v-model="smaOn" type="checkbox" data-testid="sma-on" @change="applySmaSettings" /> SMAs</label>
+      <label>Short <input v-model.number="smaShort" type="number" step="1" data-testid="sma-short" style="width:4em" /></label>
+      <label>Long <input v-model.number="smaLong" type="number" step="1" data-testid="sma-long" style="width:4em" /></label>
+      <button type="submit" data-testid="sma-apply">Apply</button>
+      <span class="hint">Whole numbers, short &lt; long; averages of completed closes</span>
+      <span v-if="smaError" class="bad" data-testid="sma-error">{{ smaError }}</span>
+      <span v-if="sma && !smaError" class="hint" data-testid="sma-crossovers">
+        Crossovers: {{ sma.crossovers.length ? sma.crossovers.map((c) => `${c.signal} ${c.timestamp.slice(11, 16)}Z`).join(', ') : 'none' }}
+      </span>
+    </form>
 
     <form v-if="mode === 'live'" class="controls" @submit.prevent="selectLive">
       <label>Symbol <input v-model="symbolInput" data-testid="symbol-input" size="8" /></label>
@@ -353,7 +415,7 @@ onBeforeUnmount(() => {
     <p v-else-if="mode === 'live' && !candles.length && symbol !== 'SAMPLE'" data-testid="no-candles">
       No recorded candles for {{ symbol }} yet; waiting for live updates…
     </p>
-    <CandleChart ref="chartRef" :key="chartKey" :rows="candles" :label="chartLabel" />
+    <CandleChart ref="chartRef" :key="chartKey" :rows="candles" :label="chartLabel" :sma="sma" />
   </main>
 </template>
 

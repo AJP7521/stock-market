@@ -60,6 +60,8 @@ stock-market/
 |   |-- recorder.py           SQLite recorder for stream observations
 |   |-- live.py               Live Yahoo feed inside FastAPI (records + notifies WebSocket clients)
 |   |-- replay.py             Read-only replay of recorded observations
+|   |-- indicators.py         SMA short/long and crossover signals
+|   |-- fixtures.py           Labelled test fixtures in a separate SQLite file
 |   |-- candles.py            One-minute candles from stored observations
 |   |-- timeframes.py         5m/15m/1h/1d candles from one-minute candles
 |   |-- market_calendar.py    NYSE regular sessions (holidays, early closes, DST)
@@ -127,6 +129,26 @@ replayed in their original arrival order, without changing the database. The sam
 
 ```bash
 curl "http://127.0.0.1:8000/api/replay?symbol=AAPL&start=2026-11-10T19:18:00Z&end=2026-11-10T19:31:00Z&timeframe=1m"
+```
+
+### Moving averages
+
+Use the **SMAs** controls (Short, Long, Apply) above the chart. Python calculates both averages from completed closes and
+the crossovers. The chart draws the lines and marks each crossover with an arrow. The same values are available as JSON:
+
+```bash
+curl "http://127.0.0.1:8000/api/indicators/sma?symbol=AAPL&timeframe=1m&short=5&long=20"
+```
+
+To check the SMA crossover fixture (labelled test data in its own database), write it, start the backend against it
+with the live feed off, then replay symbol `TESTSMA` with Short 2 and Long 3:
+
+```bash
+python3 -m backend.fixtures sma
+```
+
+```bash
+MARKET_DB=backend/data/test-sma.sqlite LIVE_FEED=off python3 -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
 ```
 
 Test controls for the upstream feed, while a page is watching the symbol:

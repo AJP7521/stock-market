@@ -21,6 +21,7 @@ import sqlite3
 from pathlib import Path
 
 from backend.candles import build_minute_candles, iso_ms
+from backend.indicators import sma_crossover
 from backend.timeframes import MINUTE_MS, aggregate, to_ms
 
 
@@ -67,8 +68,19 @@ def _series(observations: list[dict], timeframe: str, as_of_ms: int) -> list[dic
     return aggregate(minutes, timeframe, as_of_ms)["candles"]
 
 
-def replay(conn: sqlite3.Connection, symbol: str, start_ms: int, end_ms: int, timeframe: str = "1m") -> dict:
-    """Every arrival in the selection as a replay step, plus the final candles."""
+def _sma(series: list[dict], sma: tuple[int, int] | None) -> dict | None:
+    if sma is None:
+        return None
+    return sma_crossover([{**c["candle"], "complete": c["status"]["complete"]} for c in series], *sma)
+
+
+def replay(conn: sqlite3.Connection, symbol: str, start_ms: int, end_ms: int, timeframe: str = "1m",
+           sma: tuple[int, int] | None = None) -> dict:
+    """Every arrival in the selection as a replay step, plus the final candles.
+
+    With `sma=(short, long)`, each step also carries the SMA points and crossovers
+    computed from only the candles available at that step.
+    """
     arrivals = _arrivals(conn, symbol, start_ms, end_ms)
     seen: dict[int, dict] = {}           # distinct observations available so far
     steps = []
@@ -79,7 +91,8 @@ def replay(conn: sqlite3.Connection, symbol: str, start_ms: int, end_ms: int, ti
         as_of = a["received_at_ms"]
         late = max_source is not None and a["source_time_ms"] < max_source
         max_source = a["source_time_ms"] if max_source is None else max(max_source, a["source_time_ms"])
-        item = _containing(_series(list(seen.values()), timeframe, as_of), timeframe, a["source_time_ms"])
+        series = _series(list(seen.values()), timeframe, as_of)
+        item = _containing(series, timeframe, a["source_time_ms"])
         steps.append({
             "step": len(steps) + 1,
             "replay_time": iso_ms(as_of),
@@ -90,6 +103,7 @@ def replay(conn: sqlite3.Connection, symbol: str, start_ms: int, end_ms: int, ti
             },
             "candle": item["candle"] if item else None,
             "status": item["status"] if item else None,
+            **({"sma": _sma(series, sma)} if sma else {}),
         })
     final_as_of = arrivals[-1]["received_at_ms"] if arrivals else None
     final = _series(list(seen.values()), timeframe, final_as_of) if arrivals else []
@@ -102,5 +116,6 @@ def replay(conn: sqlite3.Connection, symbol: str, start_ms: int, end_ms: int, ti
         "receipt_count": len(arrivals),
         "empty": not arrivals,
         "steps": steps,
-        "final": {"candles": [c["candle"] for c in final], "status": [c["status"] for c in final]},
+        "final": {"candles": [c["candle"] for c in final], "status": [c["status"] for c in final],
+                  **({"sma": _sma(final, sma)} if sma else {})},
     }

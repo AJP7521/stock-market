@@ -302,3 +302,42 @@ No packages were installed.
 **Still requiring an actual capture:** the recorded live session contains no repeats, late arrivals or revisions (0 of 115). Those behaviours are verified only with test data. Seeing them in a real capture needs a session where Yahoo actually delivers one.
 
 **First-run fix:** before the fix, the first replay candle sat at the right edge because the chart didn't refit when a candle was appended. `upsert()` now calls `fitContent()` for new candles.
+
+---
+
+## Prompt 9A · Calculate and display two simple moving averages (2026-11-10)
+
+**Code:**
+- `backend/indicators.py` (new): `validate_windows` requires positive whole numbers with short < long. `sma_crossover` averages the closes of the last N **completed** candles; an unfinished candle gets no value and no signal. The first comparable pair sets a side, a tie keeps the last side, and only a change of side is a signal. Comparisons use exact `Fraction(Decimal(str(close)))` arithmetic; floats are used only in the response.
+- `backend/app.py`: `GET /api/indicators/sma?symbol&timeframe&short&long&as_of`. `GET /api/replay` accepts `short`/`long`, and each replay step then carries the SMA computed from only the candles available at that step.
+- `backend/fixtures.py` (new): `python3 -m backend.fixtures sma` writes the labelled **test** symbol `TESTSMA` to `backend/data/test-sma.sqlite`, a separate file that Git ignores. Closes are 13, 10, 7, 13, 19, 7, 1 (one observation per minute from 15:00Z on 2026-11-09), plus a forming 15:07 observation at 30 that *would* cross upward if it were counted.
+- `frontend`: SMA controls (on/off, Short, Long, Apply, crossover list); two line series (short blue, long orange) with gaps during warm-up; `createSeriesMarkers` arrows ("Cross up" below the bar, "Cross down" above it); SMA values and signal in the hover legend, rounded only for display. Live mode recalculates at most once per second; replay applies each step's SMA.
+
+No packages were installed.
+
+### Unit tests (**test data**)
+`python3 -m unittest discover -s backend/tests -t . -v` → **33 tests, OK** (6 new in `test_indicators.py`).
+
+| # | Test | Expected | Result |
+|---|---|---|---|
+| 1 | Full run over 7 closes, windows 2/3 | c1 —/—; c2 11.5/—; c3 8.5/10 (side below, no signal); c4 10/10 tie; c5 16/13 **up**; c6 13/13 tie; c7 4/9 **down** | pass |
+| 2 | Reveal one candle at a time (k = 1…7) | each partial run's points equal the full run's first k points, warm-up gaps included; signals collected = full run's | pass |
+| 3 | Forming 8th candle (close 30) | no value and no signal; the same close as a *completed* candle would give "up" | pass |
+| 4 | Exact comparison | closes 0.1, 0.1, 0.2, 0.15 with windows 1/3: exact tie at candle 4 keeps "above". Naive float (0.1+0.2+0.15)/3 = 0.15000000000000002 would invent a "down" | pass |
+| 5 | Window validation | 0, −1, 3/3, 4/3, 2.5, "3" rejected; 2/3 accepted | pass |
+| 6 | Replay of the TESTSMA fixture, step by step | 8 steps; at step k only k−1 candles are complete, and their values equal the hand calculation; up appears from step 6, down from step 8; 15:07 stays forming with no signal | pass |
+
+### Browser (app run against the **labelled fixture**: `MARKET_DB=backend/data/test-sma.sqlite LIVE_FEED=off`)
+Replay TESTSMA 15:00:00Z → 15:08:00Z, 1m, SMA Short 2 / Long 3, 1 step per second:
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| 1 | Mid-replay, step 5/8 (replay time 15:04:30.3Z) | 15:04 still forming, so no value and no crossover yet | legend at 15:04: `C 19 … SMA2 — SMA3 —`; "Crossovers: none" | pass |
+| 2 | End, 8/8 (15:07:10.3Z) | two markers; 15:07 forming without a marker | "Crossovers: up 15:04Z, down 15:06Z"; **two arrows on the chart** ("Cross up" under 15:04, "Cross down" over 15:06); 15:07 `forming`, SMA — | pass |
+| 3 | Hover each candle | hand calculation | 15:00 —/—; 15:01 11.5/—; 15:02 8.5/10; 15:03 10/10; 15:04 **16/13 ▲ cross up**; 15:05 13/13; 15:06 **4/9 ▼ cross down** | pass |
+| 4 | Short = 0 → Apply | readable error | "Replay request failed: short window must be a positive whole number, got 0" | pass |
+| 5 | API validation | 422 errors | short=0 → "short window must be a positive whole number, got 0"; 3/3 → "short window (3) must be smaller than long window (3)"; 2.5 → integer parsing error | pass |
+| 6 | `/api/indicators/sma?symbol=TESTSMA&short=2&long=3&as_of=2026-11-09T15:07:10.300Z` | same values as the replay | 15:00–15:06 as in #3; 15:07 None | pass |
+| 7 | Console and backend log | no errors | none | pass |
+
+Note: without `as_of`, `/api/indicators/sma` for TESTSMA uses the current time. The 15:07 minute (price 30) is then complete and correctly produces a third, upward crossover at 15:07.

@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 9)
+## What exists today (after Prompt 9A)
 
 ```
 browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
@@ -77,7 +77,10 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | Read-only replay (receipt order, as-of each arrival) + `/api/replay`, `/api/replay/sessions` | `backend/replay.py`, `backend/app.py` | exists |
 | Replay mode in the dashboard (Replay label, step, replay clock, source time, flags) | `frontend/src/App.vue` | exists |
 | `LIVE_FEED=off` switch (no Yahoo connection) | `backend/app.py` | exists |
-| Indicators, paper account, P&L | – | planned (Prompts 9A–9D) |
+| SMA short/long + crossovers (exact arithmetic, completed candles only); `/api/indicators/sma`; per-step SMA in replay | `backend/indicators.py`, `backend/app.py`, `backend/replay.py` | exists |
+| SMA lines and crossover markers on the chart | `frontend/src/CandleChart.vue`, `chartAdapter.js`, `App.vue` | exists |
+| Labelled test fixtures in a separate DB | `backend/fixtures.py` | exists |
+| Indicator framework, paper account, P&L | – | planned (Prompts 9B–9D) |
 | Decisions, review, automation | – | planned (Prompts 10–12) |
 | Voice | – | planned (Prompt 13) |
 | SmokeTest command | – | planned (Prompt 14) |
@@ -143,3 +146,12 @@ GET /api/replay ---> App.vue plays steps at N steps/s ---> CandleChart.upsert (h
 ```
 
 Replay uses the same candle code and availability rules as live, so a late observation or a revision changes its candle at the step where it originally arrived.
+
+## SMA and crossover rules (Prompt 9A)
+
+- **Inputs:** candles for one symbol and interval with their `complete` flag, and windows short < long (positive whole numbers).
+- **SMA(N) at a candle:** the mean close of the last N *completed* candles, including that candle. It is `None` during warm-up and for a forming candle.
+- **Side:** short > long is "above", short < long is "below". A tie keeps the last side, and the first comparable pair sets a side without a signal.
+- **Signal:** only a change of side; below → above is **up**, above → below is **down**.
+- **Precision:** comparisons use exact rationals; floats are produced only for display.
+- **Replay:** each step recomputes from the candles available at that step's receipt time, so an unfinished candle never confirms a crossover.

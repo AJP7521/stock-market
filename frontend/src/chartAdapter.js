@@ -4,6 +4,8 @@
 
 const UP = '#26a69a'
 const DOWN = '#ef5350'
+const SHORT = '#2962ff'
+const LONG = '#ff9800'
 
 /** "2026-11-09T14:31:00Z" -> 1794234660 (UTCTimestamp: whole seconds since the epoch, UTC). */
 export function toChartTime(isoUtc) {
@@ -45,4 +47,25 @@ export function toSeriesData(rows) {
   return { candles, volumes }
 }
 
-export const colors = { UP, DOWN }
+/**
+ * Backend SMA result -> line data (whitespace points during warm-up or while a candle forms),
+ * crossover markers, and a time -> point lookup for the legend.
+ */
+export function toSmaData(sma) {
+  if (!sma) return { short: [], long: [], markers: [], byTime: new Map() }
+  const line = (key) => sma.points.map((p) => {
+    const time = toChartTime(p.timestamp)
+    return p[key] === null ? { time } : { time, value: p[key] }
+  })
+  const markers = sma.crossovers.map((c) => ({
+    time: toChartTime(c.timestamp),
+    position: c.signal === 'up' ? 'belowBar' : 'aboveBar',
+    shape: c.signal === 'up' ? 'arrowUp' : 'arrowDown',
+    color: c.signal === 'up' ? UP : DOWN,
+    text: c.signal === 'up' ? 'Cross up' : 'Cross down',
+  }))
+  const byTime = new Map(sma.points.map((p) => [toChartTime(p.timestamp), p]))
+  return { short: line('short'), long: line('long'), markers, byTime }
+}
+
+export const colors = { UP, DOWN, SHORT, LONG }
