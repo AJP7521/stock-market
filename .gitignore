@@ -1,0 +1,23 @@
+# OS
+.DS_Store
+
+# Credentials and local environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node / Vue
+node_modules/
+dist/
+
+# Local databases and test output
+*.sqlite
+*.sqlite3
+*.db
+test-results/
+playwright-report/
