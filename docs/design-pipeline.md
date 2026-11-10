@@ -45,12 +45,15 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 3)
+## What exists today (after Prompt 4)
 
 ```
-browser --GET /api/health--> Vite dev server :5173 --proxy /api--> FastAPI :8000
-                                                                     backend/app.py
-browser <-------------- {"status":"ok","service":"backend"} <---------'
+browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
+                                                                            reads sample-candles.csv
+App.vue <---------- JSON [ {timestamp,open,high,low,close,volume}, ... ] <-----'
+   |
+   v
+chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + volume histogram
 ```
 
 | Component | File(s) | Status |
@@ -61,7 +64,8 @@ browser <-------------- {"status":"ok","service":"backend"} <---------'
 | `/api` proxy (HTTP; `ws: true` ready for WebSockets) | `frontend/vite.config.js` | exists |
 | CSV loader (`csv` module; six fields; sorted by UTC minute start) | `backend/history.py` | exists |
 | `GET /api/history` (one-minute sample candles) | `backend/app.py` | exists |
-| Chart | – | planned (Prompt 4) |
+| Candlestick + volume chart with an inspection legend (Lightweight Charts 5.2.1) | `frontend/src/CandleChart.vue` | exists |
+| Chart adapter: UTC ISO timestamp → UTCTimestamp seconds, the same time for both series | `frontend/src/chartAdapter.js` | exists |
 | Yahoo receiver, SQLite store | – | planned (Prompts 5–6) |
 | Candle building and timeframes | – | planned (Prompts 7, 7A) |
 | Live chart updates, replay | – | planned (Prompts 8–9) |

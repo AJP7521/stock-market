@@ -67,3 +67,23 @@ Source: `prompts/data/sample-candles.csv` (supplied, **synthetic** one-minute ca
 | 5 | Wrong header is rejected | `load_candles()` on a temporary CSV with header `time,...` | `ValueError` | `expected header [...] found ['time', ...]` | pass |
 
 Representation: prices are returned as JSON floats (`102.0`), and volume as an integer number of shares in that minute.
+
+---
+
+## Prompt 4 · Display a candlestick chart in Vue (2026-11-10)
+
+Installed with student approval: `npm install lightweight-charts@5.2.1` in `frontend/`, which changed `package.json` and `package-lock.json`. Its only dependency is fancy-canvas 2.1.0. Version 5.3.0 was not used because it was published on 2026-11-10 at 14:41 UTC, only hours earlier.
+
+Data: the three **synthetic** one-minute candles from `GET /api/history` (Prompt 3), labelled "Synthetic one-minute sample" on screen.
+
+| # | Check | Command / action | Expected | Observed | Result |
+|---|---|---|---|---|---|
+| 1 | Package resolves | `npm ls --depth=0`; `import('lightweight-charts')` in Node | 5.2.1 with v5 exports | 5.2.1; `createChart`, `CandlestickSeries`, `HistogramSeries` exported | pass |
+| 2 | Frontend build | `cd frontend && npm run build` | builds | `index-*.js` 231 kB (79 kB gzip), built in 175 ms | pass |
+| 3 | Time conversion | `toChartTime('2026-11-09T14:31:00Z')` | UTC seconds; formats back to 14:31 UTC | 1794234660, which formats back to `2026-11-09`, `14:31 UTC` | pass |
+| 4 | Separate candles (browser, http://127.0.0.1:5173/) | screenshot | 14:30, 14:31 and 14:32 as three candles, each with a volume bar below | three candles (green, red, green) with aligned volume bars; time axis 14:30 / 14:31 / 14:32 | pass, after one fix (see below) |
+| 5 | Inspect 14:31 (browser) | hover the 14:31 candle | close 101, volume 850 (CSV row 2) | legend: `2026-11-09 14:31 UTC O 102 H 104 L 100 C 101 Vol 850 shares`; axis label `09 Nov '26 14:31` | pass |
+| 6 | Attribution | page links | TradingView notice and docs link | built-in logo link to tradingview.com, plus footer links to tradingview.com and the docs | pass |
+| 7 | Console | browser console | no errors | no messages | pass |
+
+AutoLoop cycle 1 (check 4): the first screenshot showed all candles squeezed against the right edge. Cause: `fitContent()` ran before `autoSize` had measured the container. Fix: run `fitContent()` in `requestAnimationFrame`. The rerun passed.

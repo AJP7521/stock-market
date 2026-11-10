@@ -28,7 +28,7 @@ No real money or brokerage account is involved at any stage.
 | Transport | FastAPI 0.162.4 (HTTP + WebSocket), served by uvicorn 0.54.0 | installed (`backend/requirements.txt`) |
 | Storage | SQLite via Python's built-in `sqlite3` | available (SQLite 3.50.4) |
 | Frontend | Vue 3.5.45, built with Vite 8.3.7 and @vitejs/plugin-vue 6.0.10 | installed (`frontend/package.json`, lockfile) |
-| Charting | TradingView Lightweight Charts | **not installed** – Prompt 4 |
+| Charting | TradingView Lightweight Charts 5.2.1 | installed (`frontend/package.json`, lockfile) |
 | Market data | `yfinance` WebSocket client | **not installed** – Prompt 5 |
 | AI provider | OpenAI API (key kept in the backend environment) | **not installed** – Prompt 10 |
 
@@ -61,7 +61,7 @@ stock-market/
 |   |-- package.json          npm manifest (package-lock.json pins exact versions)
 |   |-- vite.config.js        Dev server on 5173, forwards /api to 127.0.0.1:8000
 |   |-- index.html
-|   `-- src/                  main.js, App.vue
+|   `-- src/                  main.js, App.vue, CandleChart.vue, chartAdapter.js
 |-- docs/
 |   |-- design-pipeline.md    File responsibilities and how data moves
 |   `-- verification.md       Repeatable checks and observed results
@@ -99,7 +99,8 @@ Frontend (Vite dev server on http://127.0.0.1:5173, which forwards `/api` to the
 cd frontend && npm run dev
 ```
 
-Open http://127.0.0.1:5173/. The page should show `Backend health: ok`.
+Open http://127.0.0.1:5173/. The page should show `Backend health: ok` and a candlestick chart of the
+synthetic sample. Hover over a candle to see its date, time (UTC), prices and volume.
 
 Quick checks:
 

@@ -1,18 +1,21 @@
 # Current state: 2026-11-10
 
-**Last prompt:** 03 · Load historical CSV (complete, not committed). Prompts 1 and 2 are committed (`cf96f71`, `1be70f6`).
+**Last prompt:** 04 · Integrate the candlestick chart (complete, not committed). Prompts 1–3 are committed (latest `8f6de53`).
 
-## Files created or changed (Prompt 3)
-- New: `backend/history.py`, a `csv`-module loader that checks for exactly the six fields, parses UTC timestamps and sorts by minute start
-- Updated: `backend/app.py` (adds `GET /api/history`), `README.md`, `docs/design-pipeline.md`, `docs/verification.md`
+## Files created or changed (Prompt 4)
+- New: `frontend/src/CandleChart.vue` (candles, volume and a hover legend; TradingView attribution),
+  `frontend/src/chartAdapter.js` (UTC ISO → UTCTimestamp; same time for both series)
+- Updated: `frontend/src/App.vue` (loads `/api/history`), `frontend/package.json` and `package-lock.json`
+  (lightweight-charts 5.2.1, approved), `README.md`, `docs/design-pipeline.md`, `docs/verification.md`
 
 ## Checks performed
-`/api/history` returns the three synthetic candles in order with the six fields, and the 14:31 row matches CSV
-line 2 (102/104/100/101/850). Shuffled input is sorted, and a wrong header is rejected. The backend was stopped afterwards.
+The build passes. In the browser, 14:30, 14:31 and 14:32 show as separate candles with volume bars, and hovering
+14:31 shows C 101 and Vol 850, matching the CSV. Attribution links are present, the console is clean, and one AutoLoop
+fix was needed (fitContent timing). Services were stopped afterwards.
 
 ## Outstanding questions
-- The student needs to review and approve the Prompt 3 commit.
-- The endpoint takes no symbol or timeframe yet. Prompt 7A adds the timeframe parameter.
+- The student needs to review and approve the Prompt 4 commit.
+- The chart legend has `data-testid` hooks ready for the Prompt 14 SmokeTest. No automated browser test exists yet.
 
 ## Next task
-Prompt 04 · Integrate the candlestick chart: TradingView Lightweight Charts in Vue (needs install approval).
+Prompt 05 · Connect Yahoo Finance: yfinance WebSocket subscription for AAPL (needs install approval).
