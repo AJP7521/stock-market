@@ -175,3 +175,44 @@ Command: `python3 -m unittest backend.tests.test_candles -v` → **7 tests, OK**
 | 8 | Next trading session (Nov 10) after a Nov 9 observation | first minute's volume `None` (no baseline across sessions) | as expected | pass |
 
 **Live-data spot check** (the 30 live AAPL observations from Prompt 6): `python3 -m backend.candles AAPL` → `2026-11-10T19:18:00Z O 348.255 H 348.2599 L 348.165 C 348.23 V None`, complete, n = 30. Volume is correctly unknown, because the capture began mid-session with no earlier running total. The first minute of every capture will show unknown volume.
+
+---
+
+## Prompt 7A · Derive larger candles from one-minute data (2026-11-10)
+
+Code:
+- `backend/market_calendar.py`: NYSE regular-session rules using only the standard library. It covers holidays, Good Friday, 13:00 early closes, a list of special closures, and DST through `zoneinfo`.
+- `backend/timeframes.py`: `aggregate(minutes, timeframe, as_of_ms)`.
+- `backend/app.py`: `GET /api/history?symbol=SAMPLE&timeframe=1m|5m|15m|1h|1d&as_of=ISO`. The response is `{symbol, timeframe, as_of, source, candles: [six fields], status: [...], excluded_minutes}`.
+- `frontend/src/App.vue`: now reads `.candles`.
+
+No packages were installed. I chose standard-library calendar rules over a calendar package. Unannounced closures have to be added to `SPECIAL_CLOSURES` by hand.
+
+Data: the three **synthetic** sample minutes; 14:35 and next-session minutes are **constructed test data**.
+
+Command: `python3 -m unittest discover -s backend/tests -t . -v` → **21 tests, OK** (7 from Prompt 7 and 14 new).
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| 1 | 5m from the 3 sample minutes | 14:30Z: O 100, H 105, L 99, C 104, V 3550 | identical; coverage 3/5 (partial) | pass |
+| 2 | 1d from the sample | timestamp 14:30Z (09:30 EST open), V 3550, partial day | identical; coverage 3/390 | pass |
+| 3 | Add a test minute at 14:35 | second 5m candle at 14:35; the same daily candle | 5m: 14:30Z and 14:35Z, the first still 3550; 1d: one candle, H 106, C 105, V 4250, 4 minutes | pass |
+| 4 | Add a test minute on the next session (2026-11-10 14:30Z) | new daily candle | daily candles 2026-11-09T14:30Z and 2026-11-10T14:30Z (V 400) | pass |
+| 5 | 15m and 1h alignment to the 09:30 open | 15m 15:30/15:45/20:45Z; 1h 15:30Z and 20:30Z (15:30 ET, 30 min to close) | as expected | pass |
+| 6 | Revised minute (same timestamp, later) | replaces the earlier one | V = 1200 + 900 + 1500; still 3 minutes | pass |
+| 7 | Unknown volume vs zero vs coverage | `None` + `volume_known` false, separate from a known 0 | as expected | pass |
+| 8 | as_of 14:32:00Z (replay/live) | 14:32 minute not yet available | C 101, V 2050, `complete` false | pass |
+| 9 | Minute outside the regular session | excluded from 1d, counted | `excluded_minutes` 1, V 3550 | pass |
+| 10 | 2026 calendar | NYSE 2026 holidays; early closes Nov 27 and Dec 24; DST open 14:30Z → 13:30Z on Mar 9, back on Nov 2 | as expected; Nov 27 close 18:00Z; 2025-01-09 closed; 2027-12-31 open | pass |
+| 11 | Early close shortens groups (2026-11-27) | 1d spans 210 min; last 1h 30 min | as expected | pass |
+
+HTTP checks through the Vite proxy (`curl http://127.0.0.1:5173/api/history?...`):
+
+| Query | Observed | Result |
+|---|---|---|
+| `timeframe=5m` | `{"timestamp":"2026-11-09T14:30:00Z","open":100.0,"high":105.0,"low":99.0,"close":104.0,"volume":3550}`; status: 3 of 5 minutes, `coverage_complete` false | pass |
+| `timeframe=1d` | same values; 3 of 390 minutes; `interval_end` 21:00Z | pass |
+| `timeframe=5m&as_of=2026-11-09T14:32:00Z` | C 101, V 2050, `complete` false | pass |
+| `timeframe=2m` | HTTP 422, listing the allowed values | pass |
+| `symbol=AAPL&timeframe=1m` (recorded **live** data) | 19:18Z candle, `volume: null`, `volume_known` false | pass |
+| Browser http://127.0.0.1:5173/ | chart still shows the three sample candles; no console errors | pass |

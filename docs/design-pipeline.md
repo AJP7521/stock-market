@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 7)
+## What exists today (after Prompt 7A)
 
 ```
 browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
@@ -63,13 +63,14 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | Vue app showing backend health | `frontend/src/App.vue`, `src/main.js`, `index.html` | exists |
 | `/api` proxy (HTTP; `ws: true` ready for WebSockets) | `frontend/vite.config.js` | exists |
 | CSV loader (`csv` module; six fields; sorted by UTC minute start) | `backend/history.py` | exists |
-| `GET /api/history` (one-minute sample candles) | `backend/app.py` | exists |
+| `GET /api/history?symbol=&timeframe=&as_of=` returns `{candles: [six fields], status: [...]}`; SAMPLE = CSV, other symbols = SQLite observations | `backend/app.py` | exists |
 | Candlestick + volume chart with an inspection legend (Lightweight Charts 5.2.1) | `frontend/src/CandleChart.vue` | exists |
 | Chart adapter: UTC ISO timestamp → UTCTimestamp seconds, the same time for both series | `frontend/src/chartAdapter.js` | exists |
 | Yahoo stream receiver (yfinance `AsyncWebSocket`; time-limited check; not yet wired into FastAPI) | `backend/yahoo_stream.py` | exists |
 | SQLite observation store: `observations` (distinct contents) + `receipts` (arrival log) | `backend/recorder.py`, `backend/data/market.sqlite` | exists (CLI `record`; not yet run inside FastAPI) |
 | One-minute candle builder from observations (as-of aware) | `backend/candles.py`, tests in `backend/tests/test_candles.py` | exists (not yet served over HTTP) |
-| Larger timeframes | – | planned (Prompt 7A) |
+| Larger timeframes 5m/15m/1h/1d, session-aligned, with coverage status | `backend/timeframes.py` | exists |
+| NYSE regular-session calendar (holidays, early closes, DST) | `backend/market_calendar.py` | exists |
 | Live chart updates, replay | – | planned (Prompts 8–9) |
 | Indicators, paper account, P&L | – | planned (Prompts 9A–9D) |
 | Decisions, review, automation | – | planned (Prompts 10–12) |
@@ -93,3 +94,18 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 5. **Volume:** the last running total (`day_volume`) in the minute minus the last running total before the minute in the same trading session (America/New_York date). It is **unknown (None)** when there is no baseline, an observation lacks a running total, or the running total decreases (a reset; the baseline restarts). A known 0 stays 0.
 6. **Status lives outside the six fields:** `complete` (the as-of time has reached the end of the minute), `observation_count`, `volume_known`, `volume_note`, `last_source_time`, `last_received_time`.
 7. **Recalculation:** candles are recomputed from the store, so late or corrected observations update the affected candle on the next calculation, even after the minute has completed.
+
+## Larger timeframe rules (Prompt 7A)
+
+```
+1-minute candles (CSV or candles.py) --> timeframes.aggregate(timeframe, as_of)
+                                             | market_calendar.session_containing(minute)
+                                             v
+          groups aligned to the session open (09:30 ET), ending at or before the close
+          1d = whole session, timestamped at its open (UTC)
+```
+
+- **Session:** NYSE regular hours, 09:30–16:00 ET (13:00 on early closes). Minutes outside it are excluded from 5m/15m/1h/1d and counted in `excluded_minutes`.
+- **Aggregation:** first open, highest high, lowest low, last close, sum of volumes. A later minute with the same timestamp replaces the earlier one.
+- **Status:** `complete` (the interval has ended by as-of and no live minute is still forming), `minutes_present`/`minutes_expected`/`coverage_complete` (gaps), and `volume_known`/`minutes_with_unknown_volume` (unknown is separate from 0).
+- **as_of:** a CSV minute is used only after it has ended; a live minute carries its own `complete` flag.

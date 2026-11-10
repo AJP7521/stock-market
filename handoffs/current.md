@@ -1,21 +1,22 @@
 # Current state: 2026-11-10
 
-**Last prompt:** 07 · Form one-minute candles from observations (complete, not committed). Prompts 1–6 are committed (latest `538be4d`).
+**Last prompt:** 07A · Derive higher timeframes (complete, not committed). Prompts 1–7 are committed (latest `3344b73`).
 
-## Files created or changed (Prompt 7)
-- New: `backend/candles.py` (as-of-aware one-minute candle builder and CLI), `backend/tests/__init__.py`,
-  `backend/tests/test_candles.py` (7 unittest cases with test data)
-- Updated: `README.md` (candle and test commands), `docs/design-pipeline.md` (aggregation rules), `docs/verification.md`
+## Files created or changed (Prompt 7A)
+- New: `backend/market_calendar.py` (stdlib NYSE calendar), `backend/timeframes.py` (aggregate with coverage),
+  `backend/tests/test_timeframes.py` (14 tests)
+- Updated: `backend/app.py` (`/api/history` takes symbol, timeframe and as_of, and returns `{candles, status, ...}`),
+  `frontend/src/App.vue` (reads `.candles`), `README.md`, `docs/design-pipeline.md`, `docs/verification.md`
 
 ## Checks performed
-All 7 tests pass. The prompt's 15:00 candle is 100/103/100/101/11 after the minute ends, and 100/103/100/103/9 while
-forming. A late middle observation restores the same final values. Corrections, unknown volume (no baseline, reset,
-new session) and a known zero are all covered. The live AAPL capture builds one 19:18 candle with unknown volume
-(no baseline).
+21/21 unit tests pass. 5m sample = 100/105/99/104/3550 with 3/5 coverage; 1d at 14:30Z with 3/390 coverage. The 14:35
+test minute starts a 2nd 5m candle in the same day, and a next-session minute starts a new day. 2026 holidays, early
+closes and DST were checked. HTTP checks through the proxy pass, the chart still renders, and services are stopped.
 
 ## Outstanding questions
-- The student needs to review and approve the Prompt 7 commit.
-- A live check of an unbroken capture across several minutes is still pending (live capture so far covers 28 s).
+- The student needs to review and approve the Prompt 7A commit.
+- Calendar choice: stdlib rules, not a package. Unannounced special closures must be added to `SPECIAL_CLOSURES`.
+- The frontend chart cannot draw a `null` volume yet (live minutes can have unknown volume). Handle this in Prompt 8.
 
 ## Next task
-Prompt 07A · Derive 5m/15m/1h/daily candles from the one-minute data, aligned to the regular session (exchange calendar).
+Prompt 08 · Live updates on the chart: timeframe selector and a FastAPI WebSocket pushing candle updates.

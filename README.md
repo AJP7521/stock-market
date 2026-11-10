@@ -54,11 +54,13 @@ stock-market/
 |-- AGENTS.md                 Standing instructions for the coding agent
 |-- .gitignore
 |-- backend/                  Python application logic and FastAPI routes
-|   |-- app.py                FastAPI app (GET /api/health, GET /api/history)
+|   |-- app.py                FastAPI app (GET /api/health, GET /api/history?symbol=&timeframe=&as_of=)
 |   |-- history.py            CSV loader for one-minute candles
 |   |-- yahoo_stream.py       Yahoo Finance stream receiver (time-limited check)
 |   |-- recorder.py           SQLite recorder for stream observations
 |   |-- candles.py            One-minute candles from stored observations
+|   |-- timeframes.py         5m/15m/1h/1d candles from one-minute candles
+|   |-- market_calendar.py    NYSE regular sessions (holidays, early closes, DST)
 |   |-- tests/                unittest checks (see Tests below)
 |   |-- data/market.sqlite    Local database (created by init; not in Git)
 |   `-- requirements.txt      Pinned Python dependencies
@@ -124,6 +126,19 @@ One-minute sample candles (synthetic) from `prompts/data/sample-candles.csv`:
 ```bash
 curl http://127.0.0.1:8000/api/history
 ```
+
+Other timeframes (`1m` default, `5m`, `15m`, `1h`, `1d`), recorded tickers, and an as-of time for replay:
+
+```bash
+curl "http://127.0.0.1:8000/api/history?symbol=SAMPLE&timeframe=5m"
+```
+
+```bash
+curl "http://127.0.0.1:8000/api/history?symbol=AAPL&timeframe=1d&as_of=2026-11-10T19:30:00Z"
+```
+
+The response is `{symbol, timeframe, as_of, source, candles, status, excluded_minutes}`. `candles[i]` has the six fields;
+`status[i]` reports completion, coverage and whether volume is known.
 
 Live Yahoo Finance check (no login; prints the first update, then disconnects, or reports receipt as unverified):
 

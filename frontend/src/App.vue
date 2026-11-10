@@ -24,7 +24,7 @@ async function loadHistory() {
   try {
     const res = await fetch('/api/history')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    candles.value = await res.json()
+    candles.value = (await res.json()).candles  // six-field candles; status is alongside, unused here yet
   } catch (e) {
     historyError.value = `Could not load candles: ${e.message}`
   }
