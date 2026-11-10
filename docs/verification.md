@@ -51,3 +51,19 @@ Services: backend `python3 -m uvicorn backend.app:app --host 127.0.0.1 --port 80
 | 9 | Stop command | `kill $(lsof -tiTCP:8000 -sTCP:LISTEN) $(lsof -tiTCP:5173 -sTCP:LISTEN)` | ports freed | both ports free | pass |
 
 Notes: pip offered 26.3 and npm offered 12.2.2. Neither was upgraded.
+
+---
+
+## Prompt 3 · Serve historical prices from a CSV file (2026-11-10)
+
+Source: `prompts/data/sample-candles.csv` (supplied, **synthetic** one-minute candles), read with Python's built-in `csv` module in `backend/history.py` and served at `GET /api/history`. No packages were installed.
+
+| # | Check | Command | Expected | Observed | Result |
+|---|---|---|---|---|---|
+| 1 | Endpoint responds | `curl http://127.0.0.1:8000/api/history` | 200, JSON array | 200, 3 candles | pass |
+| 2 | Order and fields | the response | ordered by timestamp; exactly the six fields | 14:30, 14:31, 14:32; keys `timestamp,open,high,low,close,volume` on every row | pass |
+| 3 | Row 2026-11-09T14:31:00Z against CSV line 2 | the response | 102 / 104 / 100 / 101 / 850 | open 102.0, high 104.0, low 100.0, close 101.0, volume 850; all six equal the CSV | pass |
+| 4 | Ordering of out-of-order input | `load_candles()` on a temporary shuffled CSV | sorted ascending | 14:32, 14:30 in the file → 14:30, 14:32 returned | pass |
+| 5 | Wrong header is rejected | `load_candles()` on a temporary CSV with header `time,...` | `ValueError` | `expected header [...] found ['time', ...]` | pass |
+
+Representation: prices are returned as JSON floats (`102.0`), and volume as an integer number of shares in that minute.

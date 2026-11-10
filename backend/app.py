@@ -6,6 +6,8 @@ Run from the project root:
 
 from fastapi import FastAPI
 
+from backend.history import load_candles
+
 app = FastAPI(title="Live Market Workstation")
 
 
@@ -13,3 +15,9 @@ app = FastAPI(title="Live Market Workstation")
 def health() -> dict:
     """Small status response used to check that the backend is reachable."""
     return {"status": "ok", "service": "backend"}
+
+
+@app.get("/api/history")
+def history() -> list[dict]:
+    """Synthetic one-minute candles from prompts/data/sample-candles.csv, ordered by timestamp."""
+    return load_candles()

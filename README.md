@@ -54,7 +54,8 @@ stock-market/
 |-- AGENTS.md                 Standing instructions for the coding agent
 |-- .gitignore
 |-- backend/                  Python application logic and FastAPI routes
-|   |-- app.py                FastAPI app (GET /api/health)
+|   |-- app.py                FastAPI app (GET /api/health, GET /api/history)
+|   |-- history.py            CSV loader for one-minute candles
 |   `-- requirements.txt      Pinned Python dependencies
 |-- frontend/                 Vue components, user input, and presentation
 |   |-- package.json          npm manifest (package-lock.json pins exact versions)
@@ -111,6 +112,12 @@ curl http://127.0.0.1:5173/api/health
 ```
 
 Both should return `{"status":"ok","service":"backend"}`.
+
+One-minute sample candles (synthetic) from `prompts/data/sample-candles.csv`:
+
+```bash
+curl http://127.0.0.1:8000/api/history
+```
 
 Stop: press `Ctrl+C` in each terminal, or stop whatever is listening on the two ports:
 

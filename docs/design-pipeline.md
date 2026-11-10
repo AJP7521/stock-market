@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 2)
+## What exists today (after Prompt 3)
 
 ```
 browser --GET /api/health--> Vite dev server :5173 --proxy /api--> FastAPI :8000
@@ -59,7 +59,8 @@ browser <-------------- {"status":"ok","service":"backend"} <---------'
 | FastAPI app, `GET /api/health` | `backend/app.py` | exists |
 | Vue app showing backend health | `frontend/src/App.vue`, `src/main.js`, `index.html` | exists |
 | `/api` proxy (HTTP; `ws: true` ready for WebSockets) | `frontend/vite.config.js` | exists |
-| CSV history endpoint | – | planned (Prompt 3) |
+| CSV loader (`csv` module; six fields; sorted by UTC minute start) | `backend/history.py` | exists |
+| `GET /api/history` (one-minute sample candles) | `backend/app.py` | exists |
 | Chart | – | planned (Prompt 4) |
 | Yahoo receiver, SQLite store | – | planned (Prompts 5–6) |
 | Candle building and timeframes | – | planned (Prompts 7, 7A) |
