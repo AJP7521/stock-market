@@ -21,7 +21,8 @@ from backend.history import load_candles
 from backend.indicator_store import add_config, delete_config, list_configs
 from backend.indicators import INDICATOR_TYPES, compute, describe_types, sma_crossover, validate_windows
 from backend.live import LiveHub
-from backend.recorder import connect, db_path, now_ms
+from backend.paper import PaperError, account_state, execute, fill_paper_orders, open_account
+from backend.recorder import connect, db_path, now_ms, record
 from backend.replay import connect_readonly, replay, sessions
 from backend.timeframes import MINUTE_MS, aggregate, to_ms
 
@@ -30,6 +31,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 SAMPLE_SYMBOL = "SAMPLE"
 # LIVE_FEED=off starts the backend without any Yahoo connection (replay and review only).
 LIVE_FEED = os.environ.get("LIVE_FEED", "on").lower() != "off"
+# TEST_FEED=on enables POST /api/test/observations, which records labelled test prices (source='test').
+TEST_FEED = os.environ.get("TEST_FEED", "off").lower() == "on"
+PAPER_ACCOUNT = os.environ.get("PAPER_ACCOUNT", "paper")
+PAPER_STARTING_CASH = float(os.environ.get("PAPER_STARTING_CASH", "1000"))
 Timeframe = Literal["1m", "5m", "15m", "1h", "1d"]
 hub = LiveHub()
 
@@ -46,7 +51,8 @@ app = FastAPI(title="Live Market Workstation", lifespan=lifespan)
 @app.get("/api/health")
 def health() -> dict:
     """Small status response used to check that the backend is reachable."""
-    return {"status": "ok", "service": "backend", "live_feed": LIVE_FEED}
+    return {"status": "ok", "service": "backend", "live_feed": LIVE_FEED, "test_feed": TEST_FEED,
+            "database": str(db_path())}
 
 
 def _parse_as_of(as_of: str | None) -> int | None:
@@ -73,7 +79,8 @@ def candle_series(symbol: str, timeframe: str, as_of_ms: int | None) -> dict:
             sources = {r[0] for r in conn.execute(
                 "SELECT DISTINCT source FROM observations WHERE ticker = ?", (symbol,))}
         minutes = [{**item["candle"], "complete": item["status"]["complete"]} for item in live]
-        source = ("TEST data (labelled fixture, SQLite)" if sources == {"test"}
+        source = ("SQLite (no observations recorded yet)" if not sources
+                  else "TEST data (labelled fixture, SQLite)" if sources == {"test"}
                   else "Yahoo Finance + TEST data (SQLite)" if "test" in sources
                   else "Yahoo Finance (recorded in SQLite)")
     result = aggregate(minutes, timeframe, as_of_ms)
@@ -328,3 +335,64 @@ def indicator_values(
         configs = list_configs(conn, symbol)
     return {"symbol": symbol, "timeframe": timeframe, "as_of": as_of,
             "indicators": configured_values(configs, candles)}
+
+
+# ---------------------------------------------------------------- paper trading (Prompt 9C)
+
+def _paper_conn():
+    conn = connect(db_path())
+    open_account(conn, PAPER_ACCOUNT, PAPER_STARTING_CASH)   # created once with the starting cash
+    return conn
+
+
+@app.get("/api/paper/account")
+def paper_account() -> dict:
+    """Cash, positions and order history (with fills) of the local paper account."""
+    conn = _paper_conn()
+    try:
+        return account_state(conn, PAPER_ACCOUNT)
+    finally:
+        conn.close()
+
+
+class OrderIn(BaseModel):
+    symbol: str = Field(min_length=1, max_length=20)
+    action: str
+    quantity: int | float | str | None = None   # validated by the execution function, not here
+    request_id: str
+
+
+@app.post("/api/paper/orders")
+def paper_order(body: OrderIn) -> dict:
+    """Submit buy/sell/close (creates an order) or hold/wait (no order) through the one execution function."""
+    conn = _paper_conn()
+    try:
+        result = execute(conn, PAPER_ACCOUNT, body.symbol.upper(), body.action, body.quantity, body.request_id)
+        return {**result, "account": account_state(conn, PAPER_ACCOUNT)}
+    except PaperError as exc:
+        raise HTTPException(422, str(exc))
+    finally:
+        conn.close()
+
+
+class TestObservationIn(BaseModel):
+    symbol: str = Field(min_length=1, max_length=20)
+    price: float = Field(gt=0)
+
+
+@app.post("/api/test/observations")
+def test_observation(body: TestObservationIn) -> dict:
+    """TEST FEED ONLY (TEST_FEED=on): record a labelled test price now, then let it fill pending orders."""
+    if not TEST_FEED:
+        raise HTTPException(403, "the test feed is off; start the backend with TEST_FEED=on")
+    conn = connect(db_path())
+    try:
+        received = now_ms()
+        last = conn.execute("SELECT MAX(day_volume) FROM observations WHERE ticker = ?", (body.symbol,)).fetchone()[0]
+        message = {"id": body.symbol, "price": body.price, "time": str(received), "day_volume": str((last or 0) + 100)}
+        result = record(conn, message, received, source="test")
+        fills = fill_paper_orders(conn, result["observation_id"])
+        return {"observation_id": result["observation_id"], "source": "test", "price": body.price,
+                "received_at_ms": received, "orders_decided": fills}
+    finally:
+        conn.close()

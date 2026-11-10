@@ -377,3 +377,56 @@ Fixture TESTRANGE: candles 15:00, 15:01, 15:02Z on 2026-11-09 with (high, low) =
 | 5 | SQLite after the checks | two rows | `1 TESTRANGE Range 2 price_range {"window": 2}`, `2 TESTRANGE Range 3 price_range {"window": 3}` | pass |
 | 6 | Duplicate name through the API | 422 | "TESTRANGE already has an indicator named 'Range 2'" | pass |
 | 7 | Console and backend log | only the intended 422s | two 422s: the Range 0 attempt, and the Short = 0 check from the 9A session; backend log clean | pass |
+
+---
+
+## Prompt 9C · Buy, sell, and close a simulated position (2026-11-10)
+
+### Design
+- **`backend/paper.py`**, one execution function: `execute(conn, account, symbol, action, quantity, request_id, submitted_ms, origin)` serves the Vue buttons now and the decision agent later. `buy N`, `sell N` and `close` create an order; `hold` (keep a position) and `wait` (stay in cash) create **no order** and return a note.
+- **Fill rule:** an accepted order stays `pending` until the **next observed price**, the first observation of that symbol *received after* submission. It fills at that price with **zero fees**. Observations are processed only as they arrive, so the same rule holds with the replay clock (`submitted_ms`).
+- **Checks at submission:** quantity must be a positive whole number. A sale can't exceed the shares held minus shares reserved by pending sales. Close needs an open position. A failed check is stored as a `rejected` order with its reason.
+- **Checks at fill:** cash (buy) or shares (sell/close) are checked again. A failure rejects the order at that point with the reason.
+- **One SQLite transaction** per fill updates the order status, the fill row (price, `observation_id`, observation time, execution time, cash and position after), cash and position.
+- **Idempotency:** `request_id` is UNIQUE. A retry returns the original order (and fill) with `duplicate: true` and creates nothing.
+- **Money:** integer micro-dollars (exact); the API converts to dollars.
+- **Tables** (in the market database): `paper_accounts`, `paper_positions`, `paper_orders`, `paper_fills`. The account `paper` is created with `PAPER_STARTING_CASH` (default 1000).
+- **Price sources:** live Yahoo observations (`live.py` → `fill_paper_orders`) and, for testing only, `POST /api/test/observations` (enabled with `TEST_FEED=on`; records `source='test'`). The page header shows "TEST price feed on".
+- **Vue (`PaperPanel.vue`):** cash, shares of the chart symbol, starting cash and fill count; Quantity, Buy, Sell, Close position, Hold, Wait, and *Retry last request* (re-sends the same `request_id`). The order history shows status, fill price, observation, execution time, cash after and reason.
+- **Source label fix:** a symbol with no observations yet is labelled "SQLite (no observations recorded yet)" instead of "Yahoo Finance".
+
+No packages were installed.
+
+### Unit tests (**test data**, disposable DB)
+`python3 -m unittest discover -s backend/tests -t . -v` → **49 tests, OK** (9 new in `test_paper.py`):
+- **Sequence:** buy 4 @ 100 → 600 / 4; sell 1 @ 110 → 710 / 3; close @ 105 → 1025 / 0. Fills record observation ids 1–3 and cash and position after.
+- **Persistence:** the same state after reopening the database.
+- **Retry:** the same `request_id` while pending and after the fill returns the original order; one order and one fill.
+- **Empty account:** selling or closing is rejected with a reason.
+- **Invalid quantities:** 0, −1, 2.5, "3", null and true are rejected; an unknown action raises an error.
+- **Hold/wait:** no order.
+- **Timing:** a price received before submission does not fill.
+- **Recheck at fill:** cash is checked again (4 × 300 > 1000 → rejected).
+- **Reservations:** pending sales reserve shares.
+
+### Browser (disposable DB: `MARKET_DB=$SCRATCHPAD/paper-demo.sqlite LIVE_FEED=off TEST_FEED=on`), symbol TESTPAPER, starting cash $1,000
+Prices were supplied with `curl -X POST http://127.0.0.1:8000/api/test/observations -d '{"symbol":"TESTPAPER","price":…}'` (**test data**).
+
+| # | Browser action, then price | Expected | Observed on screen | Result |
+|---|---|---|---|---|
+| 1 | Quantity 4 → **Buy** | pending, cash unchanged | "Order #1 buy 4 TESTPAPER: accepted: pending until the next observed price"; $1,000.00, 0 shares | pass |
+| 2 | price $100 (observation #1) | cash $600, 4 shares | **$600.00, 4 shares**; #1 filled $100.00, obs #1 | pass |
+| 3 | Quantity 1 → **Sell**; price $110 (#2) | cash $710, 3 shares | **$710.00, 3 shares** | pass |
+| 4 | **Close position**; price $105 (#3) | cash $1,025, 0 shares | "Order #3 close 3 …"; **$1,025.00, 0 shares** | pass |
+| 5 | **Retry last request** (the close) | no new order or fill | "Order #3 close 3 TESTPAPER: duplicate request_id: returning the original order"; still 3 order rows; cash unchanged | pass |
+| 6 | **Sell** 1 from the empty position | rejection with reason | "Order #4 sell 1 TESTPAPER: rejected: cannot sell 1 TESTPAPER: only 0 shares available" | pass |
+| 7 | **Restart the backend**, reload the page | exactly 3 fills persist | header "Cash $1,025.00 · TESTPAPER shares 0 · fills 3"; 3 filled rows; `/api/paper/account` fill_count 3, cash 1025 | pass |
+
+**SQLite compared with the dashboard** (direct `sqlite3` query on the disposable DB):
+- `paper_orders`: 1 buy 4 filled · 2 sell 1 filled · 3 close 3 filled · 4 sell 1 rejected ("cannot sell 1 TESTPAPER: only 0 shares available").
+- `paper_fills`: (order 1, buy, 4, 100.0, obs 1, cash after 600.0, position 4) · (order 2, sell, 1, 110.0, obs 2, 710.0, 3) · (order 3, close, 3, 105.0, obs 3, 1025.0, 0).
+- `paper_accounts`: cash 1025.0, start 1000.0. `paper_positions`: TESTPAPER 0. `observations`: 100 / 110 / 105, all `source = test`.
+
+These match the dashboard row for row. The backend logs show no errors. The browser console showed 502s from the account polling while the backend was restarting, plus the 422s left from the earlier 9A and 9B checks.
+
+**Not yet exercised:** paper orders filled by a **live** Yahoo price (the hook is in `live.py`, but this check used the test feed), and orders placed during replay (the replay UI does not trade; automation comes in Prompt 12).

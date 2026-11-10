@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 9B)
+## What exists today (after Prompt 9C)
 
 ```
 browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
@@ -82,7 +82,10 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | Labelled test fixtures in a separate DB | `backend/fixtures.py` | exists |
 | Indicator interface (`INDICATOR_TYPES`: sma, price_range) and stored named instances | `backend/indicators.py`, `backend/indicator_store.py` | exists |
 | Indicator panel, lines per instance (price pane / second pane), values table | `frontend/src/IndicatorPanel.vue`, `CandleChart.vue`, `App.vue` | exists |
-| Paper account, P&L | – | planned (Prompts 9C–9D) |
+| Long-only paper account, one execution function, next-price fills, idempotent request ids | `backend/paper.py`, `/api/paper/*` | exists |
+| Paper panel (cash, shares, orders, buy/sell/close/hold/wait, retry) | `frontend/src/PaperPanel.vue` | exists |
+| Test price feed (`TEST_FEED=on`, `POST /api/test/observations`) | `backend/app.py` | exists |
+| P&L history | – | planned (Prompt 9D) |
 | Decisions, review, automation | – | planned (Prompts 10–12) |
 | Voice | – | planned (Prompt 13) |
 | SmokeTest command | – | planned (Prompt 14) |
@@ -173,3 +176,17 @@ GET /api/indicator-values: candle_series(symbol, timeframe) --> compute() per st
 - **Output:** one value per candle time, or a warm-up gap (null).
 - **SMA:** shares `_sma_exact` with the 9A crossover.
 - **Adding a type:** write a `compute` function and register it; no Vue change is needed, because the panel builds its settings inputs from the schema.
+
+## Paper trading path (Prompt 9C)
+
+```
+Vue PaperPanel --POST /api/paper/orders {symbol, action, quantity, request_id}--> paper.execute()
+      buy/sell/close -> paper_orders (pending | rejected+reason)      hold/wait -> no order
+      same request_id again -> the original order (duplicate: true)
+
+new observation (live.py, or POST /api/test/observations with TEST_FEED=on) -> recorder.record()
+      -> paper.fill_paper_orders(observation)
+           for each pending order submitted before this observation was received (oldest first):
+             BEGIN; recheck cash/shares; fill at the observation price (zero fees) or reject;
+             paper_fills + paper_orders + paper_accounts.cash + paper_positions; COMMIT
+```

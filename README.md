@@ -62,6 +62,7 @@ stock-market/
 |   |-- replay.py             Read-only replay of recorded observations
 |   |-- indicators.py         Indicator interface (types: sma, price_range) + SMA crossover
 |   |-- indicator_store.py    Named indicator instances stored in SQLite
+|   |-- paper.py              Long-only paper account: one execution function, next-price fills
 |   |-- fixtures.py           Labelled test fixtures in a separate SQLite file
 |   |-- candles.py            One-minute candles from stored observations
 |   |-- timeframes.py         5m/15m/1h/1d candles from one-minute candles
@@ -73,7 +74,7 @@ stock-market/
 |   |-- package.json          npm manifest (package-lock.json pins exact versions)
 |   |-- vite.config.js        Dev server on 5173, forwards /api to 127.0.0.1:8000
 |   |-- index.html
-|   `-- src/                  main.js, App.vue, CandleChart.vue, IndicatorPanel.vue, chartAdapter.js
+|   `-- src/                  main.js, App.vue, CandleChart.vue, IndicatorPanel.vue, PaperPanel.vue, chartAdapter.js
 |-- docs/
 |   |-- design-pipeline.md    File responsibilities and how data moves
 |   `-- verification.md       Repeatable checks and observed results
@@ -139,6 +140,22 @@ the crossovers. The chart draws the lines and marks each crossover with an arrow
 
 ```bash
 curl "http://127.0.0.1:8000/api/indicators/sma?symbol=AAPL&timeframe=1m&short=5&long=20"
+```
+
+### Paper trading (simulated, long-only)
+
+The **Paper account** panel shows cash, shares and order history, with **Buy**, **Sell**, **Close position**, **Hold** and
+**Wait**. An order is filled at the next observed price after you submit it, with zero fees. Hold and wait create no
+order. The account starts with `PAPER_STARTING_CASH` (default 1000) the first time it is opened.
+
+To practise with known prices instead of the live feed, use a disposable database and turn on the test price feed:
+
+```bash
+MARKET_DB=/tmp/paper-demo.sqlite LIVE_FEED=off TEST_FEED=on python3 -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/test/observations -H 'Content-Type: application/json' -d '{"symbol":"TESTPAPER","price":100}'
 ```
 
 ### Configurable indicators

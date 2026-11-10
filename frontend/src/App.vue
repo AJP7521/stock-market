@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import CandleChart from './CandleChart.vue'
 import IndicatorPanel from './IndicatorPanel.vue'
+import PaperPanel from './PaperPanel.vue'
 
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '1d']
 
@@ -323,6 +324,7 @@ onBeforeUnmount(() => {
       <strong v-else-if="error" data-testid="health-error">{{ error }}</strong>
       <span v-else>checking…</span>
       <small v-if="health && health.live_feed === false" data-testid="live-feed-off"> · live feed off</small>
+      <small v-if="health && health.test_feed" class="warn" data-testid="test-feed-on"> · TEST price feed on</small>
       <button type="button" @click="checkHealth">Check again</button>
     </p>
 
@@ -444,6 +446,8 @@ onBeforeUnmount(() => {
     <p v-else-if="mode === 'live' && !candles.length && symbol !== 'SAMPLE'" data-testid="no-candles">
       No recorded candles for {{ symbol }} yet; waiting for live updates…
     </p>
+    <PaperPanel v-if="mode === 'live'" :symbol="symbol" />
+
     <IndicatorPanel :symbol="mode === 'replay' ? (replaySymbol.trim().toUpperCase() || symbol) : symbol"
                     @changed="indicatorsChanged" />
 

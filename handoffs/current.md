@@ -1,24 +1,21 @@
 # Current state: 2026-11-10
 
-**Last prompt:** 09B · Create chart indicators (complete, not committed). Prompts 1–9A are committed (latest `706a938`).
+**Last prompt:** 09C · Paper trading (complete, not committed). Prompts 1–9B are committed (latest `780af57`).
 
-## Files created or changed (Prompt 9B)
-- New: `backend/indicator_store.py`, `backend/tests/test_indicator_types.py` (7 tests), `frontend/src/IndicatorPanel.vue`
-- Updated: `backend/indicators.py` (indicator interface, sma and price_range types; crossover reuses `_sma_exact`),
-  `backend/app.py` (indicator types/configs/values endpoints; test-data source label; configs in replay),
-  `backend/replay.py` (per-step indicator values), `backend/fixtures.py` (`range` fixture), `frontend/src/App.vue`
-  (panel, values table, URL keeps symbol and interval), `frontend/src/CandleChart.vue` (indicator lines, second pane, legend),
-  `frontend/src/chartAdapter.js` (`toIndicatorLines`), `README.md`, `docs/design-pipeline.md`, `docs/verification.md`
-- Local, not in Git: `backend/data/test-range.sqlite` (TESTRANGE fixture with the two stored configs)
+## Files created or changed (Prompt 9C)
+- New: `backend/paper.py`, `backend/tests/test_paper.py` (9 tests), `frontend/src/PaperPanel.vue`
+- Updated: `backend/app.py` (`/api/paper/account`, `/api/paper/orders`, `TEST_FEED` + `/api/test/observations`,
+  source label for symbols without observations), `backend/live.py` (live observations fill pending orders),
+  `frontend/src/App.vue` (panel, "TEST price feed on" badge), `README.md`, `docs/design-pipeline.md`, `docs/verification.md`
 
 ## Checks performed
-40/40 unit tests pass. Browser against the fixture: Range 2 = 5 and Range 3 = 6 at the third candle; both return after a
-page reload; window 0 gives "Window (candles) must be at least 1, got 0" and the valid ones stay. SQLite holds exactly the
-two configs. Services were stopped.
+49/49 unit tests pass. Browser run on a disposable DB with the test feed: buy 4 @ 100 → $600 / 4; sell 1 @ 110 → $710 / 3;
+close @ 105 → $1,025 / 0. A retry returned the original order; a sale from the empty account was rejected with a reason;
+after a backend restart exactly 3 fills remain. SQLite matches the dashboard. Services were stopped.
 
 ## Outstanding questions
-- The student needs to review and approve the Prompt 9B commit.
-- The Prompt 9A SMA pair (short/long controls) is still separate UI; it now shares the SMA calculation with the `sma` type.
+- The student needs to review and approve the Prompt 9C commit.
+- Not exercised: a fill from a live Yahoo price; trading during replay (Prompt 12).
 
 ## Next task
-Prompt 09C · Paper trading: long-only account in SQLite, buy/sell/close, one execution function, next-price fills.
+Prompt 09D · P&L history: weighted average cost; realized/unrealized rows after fills and completed-candle valuations.

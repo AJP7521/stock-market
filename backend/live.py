@@ -24,6 +24,7 @@ import logging
 
 from yfinance import AsyncWebSocket
 
+from backend.paper import fill_paper_orders
 from backend.recorder import connect, db_path, now_ms, record
 
 log = logging.getLogger("live")
@@ -146,6 +147,8 @@ class SymbolFeed:
         except (ValueError, KeyError) as exc:   # undecodable or incomplete message: skip it, keep the feed
             log.warning("%s: skipped message: %s", self.symbol, exc)
             return
+        if not result["is_repeat"]:              # a new observed price may fill pending paper orders
+            fill_paper_orders(self._conn, result["observation_id"])
         self.messages += 1
         self.last_source_ms = int(message["time"])
         self.last_received_ms = received
