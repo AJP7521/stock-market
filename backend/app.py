@@ -6,21 +6,25 @@ Run from the project root:
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 
-from backend.candles import minute_candles
+from backend.candles import iso_ms, minute_candles
 from backend.history import load_candles
 from backend.live import LiveHub
 from backend.recorder import connect, db_path, now_ms
+from backend.replay import connect_readonly, replay, sessions
 from backend.timeframes import MINUTE_MS, aggregate, to_ms
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 SAMPLE_SYMBOL = "SAMPLE"
+# LIVE_FEED=off starts the backend without any Yahoo connection (replay and review only).
+LIVE_FEED = os.environ.get("LIVE_FEED", "on").lower() != "off"
 Timeframe = Literal["1m", "5m", "15m", "1h", "1d"]
 hub = LiveHub()
 
@@ -37,7 +41,7 @@ app = FastAPI(title="Live Market Workstation", lifespan=lifespan)
 @app.get("/api/health")
 def health() -> dict:
     """Small status response used to check that the backend is reachable."""
-    return {"status": "ok", "service": "backend"}
+    return {"status": "ok", "service": "backend", "live_feed": LIVE_FEED}
 
 
 def _parse_as_of(as_of: str | None) -> int | None:
@@ -114,12 +118,15 @@ async def candle_updates(websocket: WebSocket, symbol: str = SAMPLE_SYMBOL, time
         return
     base = {"symbol": symbol, "interval": timeframe}
 
-    if symbol == SAMPLE_SYMBOL:   # synthetic CSV: nothing live to stream
+    if symbol == SAMPLE_SYMBOL or not LIVE_FEED:   # nothing live to stream
+        detail = ("synthetic CSV sample; no live feed" if symbol == SAMPLE_SYMBOL
+                  else "live feed is off (LIVE_FEED=off)")
         try:
             while True:
                 await websocket.send_json({**base, "type": "feed", "feed": {
-                    "status": "offline", "detail": "synthetic CSV sample; no live feed",
-                    "source": "synthetic CSV", "server_time_ms": now_ms()}})
+                    "status": "offline", "detail": detail,
+                    "source": "synthetic CSV" if symbol == SAMPLE_SYMBOL else "yahoo",
+                    "server_time_ms": now_ms()}})
                 await asyncio.sleep(5)
         except (WebSocketDisconnect, RuntimeError):
             return
@@ -173,3 +180,38 @@ def live_connect(symbol: str) -> dict:
         raise HTTPException(404, f"no live feed running for {symbol}")
     feed.resume()
     return {"symbol": symbol, "resumed": True}
+
+
+@app.get("/api/replay/sessions")
+def replay_sessions() -> dict:
+    """Recorded symbols available for replay (read-only)."""
+    try:
+        conn = connect_readonly(db_path())
+    except FileNotFoundError:
+        return {"sessions": []}
+    try:
+        rows = sessions(conn)
+    finally:
+        conn.close()
+    return {"sessions": [{**r, "first": iso_ms(r["first_ms"]), "last": iso_ms(r["last_ms"])} for r in rows]}
+
+
+@app.get("/api/replay")
+def replay_session(
+    symbol: str,
+    start: str = Query(..., description="UTC start of the source-time range, inclusive"),
+    end: str = Query(..., description="UTC end of the source-time range, exclusive"),
+    timeframe: Timeframe = "1m",
+) -> dict:
+    """Replay steps for one symbol and time range, computed read-only from SQLite."""
+    start_ms, end_ms = _parse_as_of(start), _parse_as_of(end)
+    if end_ms <= start_ms:
+        raise HTTPException(422, "end must be after start")
+    try:
+        conn = connect_readonly(db_path())
+    except FileNotFoundError:
+        raise HTTPException(404, "no recorded database yet")
+    try:
+        return replay(conn, symbol, start_ms, end_ms, timeframe)
+    finally:
+        conn.close()

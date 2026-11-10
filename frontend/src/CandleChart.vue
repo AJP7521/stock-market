@@ -50,7 +50,9 @@ function upsert(row) {
   const historical = latest !== null && candle.time < latest   // a late update to an earlier candle
   candleSeries.update(candle, historical)
   volumeSeries.update(volume, historical)
+  const appended = !byTime.has(candle.time)
   byTime.set(candle.time, row)
+  if (appended) chart.timeScale().fitContent()   // keep a newly started candle in view
   if (!hovering) showLatest()
 }
 

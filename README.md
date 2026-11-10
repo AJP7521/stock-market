@@ -59,6 +59,7 @@ stock-market/
 |   |-- yahoo_stream.py       Yahoo Finance stream receiver (time-limited check)
 |   |-- recorder.py           SQLite recorder for stream observations
 |   |-- live.py               Live Yahoo feed inside FastAPI (records + notifies WebSocket clients)
+|   |-- replay.py             Read-only replay of recorded observations
 |   |-- candles.py            One-minute candles from stored observations
 |   |-- timeframes.py         5m/15m/1h/1d candles from one-minute candles
 |   |-- market_calendar.py    NYSE regular sessions (holidays, early closes, DST)
@@ -112,6 +113,21 @@ hours. Every update is recorded in `backend/data/market.sqlite`. Use the Interva
 switch timeframes, or enter `SAMPLE` and press Load to see the synthetic CSV. The status bar shows the source, the age
 of the latest source observation, the feed state, the browser's own connection to FastAPI, and whether the latest
 candle is still forming. Hover over a candle to see its date, time (UTC), prices and volume.
+
+### Replay a recorded session (live feed off)
+
+Start the backend without any Yahoo connection, start the frontend as usual, and click **Replay**:
+
+```bash
+LIVE_FEED=off python3 -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
+```
+
+Choose a recorded symbol and a UTC range (prefilled from the recording), then click **Start replay**. Observations are
+replayed in their original arrival order, without changing the database. The same is available as JSON:
+
+```bash
+curl "http://127.0.0.1:8000/api/replay?symbol=AAPL&start=2026-11-10T19:18:00Z&end=2026-11-10T19:31:00Z&timeframe=1m"
+```
 
 Test controls for the upstream feed, while a page is watching the symbol:
 

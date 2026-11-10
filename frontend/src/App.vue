@@ -7,6 +7,7 @@ const TIMEFRAMES = ['1m', '5m', '15m', '1h', '1d']
 const health = ref(null)
 const error = ref('')
 
+const mode = ref('live')            // 'live' or 'replay'
 const symbolInput = ref('AAPL')
 const symbol = ref('AAPL')
 const timeframe = ref('1m')
@@ -18,9 +19,22 @@ const feed = ref(null)              // upstream feed status from FastAPI
 const socketState = ref('closed')   // browser <-> FastAPI WebSocket
 const nowMs = ref(Date.now())
 const chartRef = ref(null)
+const chartKey = ref(0)
+
+// Replay state
+const sessions = ref([])
+const replaySymbol = ref('')
+const replayStart = ref('')
+const replayEnd = ref('')
+const replaySpeed = ref(10)         // steps per second
+const replay = ref(null)            // response of GET /api/replay
+const replayIndex = ref(0)          // number of steps applied
+const replayMessage = ref('')
+const replayRunning = ref(false)
 
 let socket = null
 let clock = null
+let replayTimer = null
 let generation = 0                  // ignores messages from a superseded subscription
 
 async function checkHealth() {
@@ -35,6 +49,7 @@ async function checkHealth() {
   }
 }
 
+// ---------------------------------------------------------------- live mode
 async function loadHistory(gen) {
   historyError.value = ''
   const q = new URLSearchParams({ symbol: symbol.value, timeframe: timeframe.value })
@@ -45,6 +60,7 @@ async function loadHistory(gen) {
   candles.value = body.candles
   source.value = body.source
   latestStatus.value = body.status.at(-1) ?? null
+  chartKey.value++
 }
 
 function openSocket(gen) {
@@ -62,22 +78,8 @@ function openSocket(gen) {
     const msg = JSON.parse(event.data)
     if (msg.symbol !== symbol.value || msg.interval !== timeframe.value) return
     feed.value = msg.feed
-    if (msg.type === 'candle') {
-      chartRef.value?.upsert(msg.candle)
-      upsertRow(msg.candle)
-      if (!candles.value.length || msg.candle.timestamp >= candles.value.at(-1).timestamp) {
-        latestStatus.value = msg.status
-      }
-    }
+    if (msg.type === 'candle') applyCandle(msg.candle, msg.status)
   }
-}
-
-// Keep the history array in step with live updates, without triggering a full redraw.
-function upsertRow(row) {
-  const rows = candles.value
-  const i = rows.findIndex((r) => r.timestamp === row.timestamp)
-  if (i >= 0) rows[i] = row
-  else rows.push(row)
 }
 
 function closeSocket() {
@@ -89,8 +91,10 @@ function closeSocket() {
   socketState.value = 'closed'
 }
 
-async function select() {
+async function selectLive() {
+  stopReplay()
   const gen = ++generation
+  mode.value = 'live'
   symbol.value = symbolInput.value.trim().toUpperCase() || 'SAMPLE'
   feed.value = null
   latestStatus.value = null
@@ -102,6 +106,107 @@ async function select() {
   if (gen === generation) openSocket(gen)
 }
 
+// Update one candle on the chart and in the history array (no full redraw).
+function applyCandle(row, status) {
+  chartRef.value?.upsert(row)
+  const rows = candles.value
+  const i = rows.findIndex((r) => r.timestamp === row.timestamp)
+  if (i >= 0) rows[i] = row
+  else rows.push(row)
+  if (rows.at(-1).timestamp === row.timestamp) latestStatus.value = status
+}
+
+// ---------------------------------------------------------------- replay mode
+const floorMinute = (iso) => iso.slice(0, 16) + ':00Z'
+const nextMinute = (iso) => new Date(Date.parse(floorMinute(iso)) + 60000).toISOString().slice(0, 19) + 'Z'
+
+async function enterReplay() {
+  ++generation
+  closeSocket()
+  mode.value = 'replay'
+  feed.value = null
+  source.value = ''
+  latestStatus.value = null
+  replay.value = null
+  replayMessage.value = ''
+  candles.value = []
+  chartKey.value++
+  const res = await fetch('/api/replay/sessions')
+  sessions.value = (await res.json()).sessions
+  if (sessions.value.length && !sessions.value.some((s) => s.symbol === replaySymbol.value)) {
+    pickSession(sessions.value[0].symbol)
+  }
+}
+
+function pickSession(sym) {
+  const s = sessions.value.find((x) => x.symbol === sym)
+  replaySymbol.value = sym
+  if (s) {
+    replayStart.value = floorMinute(s.first)
+    replayEnd.value = nextMinute(s.last)
+  }
+}
+
+async function startReplay() {
+  stopReplay()
+  replayMessage.value = ''
+  replay.value = null
+  replayIndex.value = 0
+  candles.value = []
+  latestStatus.value = null
+  chartKey.value++
+  const q = new URLSearchParams({
+    symbol: replaySymbol.value.trim().toUpperCase(), start: replayStart.value, end: replayEnd.value,
+    timeframe: timeframe.value,
+  })
+  const res = await fetch(`/api/replay?${q}`)
+  const body = await res.json()
+  if (!res.ok) {
+    replayMessage.value = `Replay request failed: ${typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)}`
+    return
+  }
+  symbol.value = body.symbol
+  source.value = 'Replay of recorded Yahoo observations (SQLite, read-only)'
+  if (body.empty) {
+    replayMessage.value = `${body.symbol} has no recorded observations between ${body.start} and ${body.end}.`
+    return
+  }
+  replay.value = body
+  replayRunning.value = true
+  replayTimer = setInterval(stepReplay, 1000 / Math.max(1, Number(replaySpeed.value) || 10))
+}
+
+function stepReplay() {
+  const r = replay.value
+  if (!r || replayIndex.value >= r.steps.length) return stopReplay()
+  const step = r.steps[replayIndex.value]
+  if (step.candle) applyCandle(step.candle, step.status)
+  replayIndex.value++
+  if (replayIndex.value >= r.steps.length) stopReplay()
+}
+
+function finishReplay() {
+  if (!replay.value) return
+  clearInterval(replayTimer)
+  while (replayIndex.value < replay.value.steps.length) stepReplay()
+  stopReplay()
+}
+
+function stopReplay() {
+  clearInterval(replayTimer)
+  replayTimer = null
+  replayRunning.value = false
+}
+
+function changeTimeframe() {
+  if (mode.value === 'live') selectLive()
+  else if (replay.value || replayMessage.value) startReplay()
+}
+
+const currentStep = computed(() =>
+  replay.value && replayIndex.value > 0 ? replay.value.steps[replayIndex.value - 1] : null)
+
+// ---------------------------------------------------------------- display
 const ageSeconds = computed(() => {
   const t = feed.value?.last_source_time_ms
   return t ? Math.max(0, Math.round((nowMs.value - t) / 1000)) : null
@@ -111,18 +216,21 @@ const feedClass = computed(() => ({
   live: 'ok', quiet: 'warn', connecting: 'warn', offline: 'muted',
 }[feed.value?.status] ?? 'bad'))
 
-const chartLabel = computed(() =>
-  symbol.value === 'SAMPLE' ? 'Synthetic one-minute sample (prompts/data/sample-candles.csv)'
-                            : `${symbol.value} · ${timeframe.value}`)
+const chartLabel = computed(() => {
+  if (mode.value === 'replay') return `Replay · ${symbol.value || replaySymbol.value} · ${timeframe.value}`
+  return symbol.value === 'SAMPLE' ? 'Synthetic one-minute sample (prompts/data/sample-candles.csv)'
+                                   : `${symbol.value} · ${timeframe.value}`
+})
 
 onMounted(() => {
   checkHealth()
-  select()
+  selectLive()
   clock = setInterval(() => { nowMs.value = Date.now() }, 1000)
 })
 
 onBeforeUnmount(() => {
   clearInterval(clock)
+  stopReplay()
   closeSocket()
 })
 </script>
@@ -135,39 +243,97 @@ onBeforeUnmount(() => {
       <strong v-if="health" data-testid="health-status">{{ health.status }}</strong>
       <strong v-else-if="error" data-testid="health-error">{{ error }}</strong>
       <span v-else>checking…</span>
+      <small v-if="health && health.live_feed === false" data-testid="live-feed-off"> · live feed off</small>
       <button type="button" @click="checkHealth">Check again</button>
     </p>
 
-    <form class="controls" @submit.prevent="select">
-      <label>Symbol <input v-model="symbolInput" data-testid="symbol-input" size="8" /></label>
+    <div class="modes">
+      <button type="button" :class="{ active: mode === 'live' }" data-testid="mode-live" @click="selectLive">Live</button>
+      <button type="button" :class="{ active: mode === 'replay' }" data-testid="mode-replay" @click="enterReplay">Replay</button>
       <label>
         Interval
-        <select v-model="timeframe" data-testid="timeframe-select" @change="select">
+        <select v-model="timeframe" data-testid="timeframe-select" @change="changeTimeframe">
           <option v-for="tf in TIMEFRAMES" :key="tf" :value="tf">{{ tf }}</option>
         </select>
       </label>
+    </div>
+
+    <form v-if="mode === 'live'" class="controls" @submit.prevent="selectLive">
+      <label>Symbol <input v-model="symbolInput" data-testid="symbol-input" size="8" /></label>
       <button type="submit">Load</button>
       <span class="hint">SAMPLE = synthetic CSV; any other symbol streams from Yahoo Finance</span>
     </form>
 
+    <form v-else class="controls" data-testid="replay-form" @submit.prevent="startReplay">
+      <label>
+        Recorded symbol
+        <input v-model="replaySymbol" list="recorded-symbols" data-testid="replay-symbol" size="8"
+               @change="pickSession(replaySymbol.trim().toUpperCase())" />
+        <datalist id="recorded-symbols">
+          <option v-for="s in sessions" :key="s.symbol" :value="s.symbol">
+            {{ s.observations }} observations, {{ s.first }} → {{ s.last }}
+          </option>
+        </datalist>
+      </label>
+      <label>From (UTC) <input v-model="replayStart" data-testid="replay-start" size="21" /></label>
+      <label>To (UTC) <input v-model="replayEnd" data-testid="replay-end" size="21" /></label>
+      <label>Steps/s <input v-model.number="replaySpeed" type="number" min="1" max="200" data-testid="replay-speed" style="width:4em" /></label>
+      <button type="submit" data-testid="replay-start-button">Start replay</button>
+      <button type="button" :disabled="!replayRunning" @click="stopReplay">Pause</button>
+      <button type="button" :disabled="!replay || replayIndex >= replay.steps.length" data-testid="replay-finish"
+              @click="finishReplay">Skip to end</button>
+      <span class="hint" v-if="sessions.length">
+        Recorded: <span v-for="s in sessions" :key="s.symbol">{{ s.symbol }} ({{ s.observations }} obs, {{ s.first }} → {{ s.last }}) </span>
+      </span>
+      <span class="hint" v-else>No recorded sessions yet.</span>
+    </form>
+
     <dl class="status" data-testid="live-status">
+      <div><dt>Mode</dt><dd data-testid="status-mode">{{ mode === 'replay' ? 'Replay' : 'Live' }}</dd></div>
       <div><dt>Symbol</dt><dd data-testid="status-symbol">{{ symbol }}</dd></div>
       <div><dt>Interval</dt><dd data-testid="status-interval">{{ timeframe }}</dd></div>
       <div><dt>Source</dt><dd data-testid="status-source">{{ source || '—' }}</dd></div>
-      <div>
-        <dt>Last source observation</dt>
-        <dd data-testid="status-age">
-          <template v-if="ageSeconds !== null">{{ ageSeconds }} s ago</template>
-          <template v-else>none yet</template>
-        </dd>
-      </div>
-      <div>
-        <dt>Feed</dt>
-        <dd :class="feedClass" data-testid="status-feed">
-          {{ feed?.status ?? 'waiting' }}<small v-if="feed?.detail"> ({{ feed.detail }})</small>
-        </dd>
-      </div>
-      <div><dt>Browser ↔ FastAPI</dt><dd data-testid="status-socket">{{ socketState }}</dd></div>
+      <template v-if="mode === 'live'">
+        <div>
+          <dt>Last source observation</dt>
+          <dd data-testid="status-age">
+            <template v-if="ageSeconds !== null">{{ ageSeconds }} s ago</template>
+            <template v-else>none yet</template>
+          </dd>
+        </div>
+        <div>
+          <dt>Feed</dt>
+          <dd :class="feedClass" data-testid="status-feed">
+            {{ feed?.status ?? 'waiting' }}<small v-if="feed?.detail"> ({{ feed.detail }})</small>
+          </dd>
+        </div>
+        <div><dt>Browser ↔ FastAPI</dt><dd data-testid="status-socket">{{ socketState }}</dd></div>
+      </template>
+      <template v-else>
+        <div>
+          <dt>Replaying observation</dt>
+          <dd data-testid="replay-progress">
+            <template v-if="replay">{{ replayIndex }} / {{ replay.steps.length }}</template><template v-else>—</template>
+          </dd>
+        </div>
+        <div>
+          <dt>Replay time (received)</dt>
+          <dd data-testid="replay-time">{{ currentStep?.replay_time ?? '—' }}</dd>
+        </div>
+        <div>
+          <dt>Source time</dt>
+          <dd data-testid="replay-source-time">
+            {{ currentStep?.observation.source_time ?? '—' }}
+            <strong v-if="currentStep?.observation.late" class="warn"> late</strong>
+            <strong v-if="currentStep?.observation.revises_id" class="warn"> revision of #{{ currentStep.observation.revises_id }}</strong>
+            <small v-if="currentStep?.observation.is_repeat"> repeat</small>
+          </dd>
+        </div>
+        <div>
+          <dt>Price</dt>
+          <dd data-testid="replay-price">{{ currentStep?.observation.price ?? '—' }}</dd>
+        </div>
+      </template>
       <div>
         <dt>Latest candle</dt>
         <dd data-testid="status-candle">
@@ -182,18 +348,21 @@ onBeforeUnmount(() => {
       </div>
     </dl>
 
+    <p v-if="replayMessage" class="notice" data-testid="replay-message">{{ replayMessage }}</p>
     <p v-if="historyError" data-testid="history-error">{{ historyError }}</p>
-    <p v-else-if="!candles.length && symbol !== 'SAMPLE'" data-testid="no-candles">
+    <p v-else-if="mode === 'live' && !candles.length && symbol !== 'SAMPLE'" data-testid="no-candles">
       No recorded candles for {{ symbol }} yet; waiting for live updates…
     </p>
-    <CandleChart ref="chartRef" :key="`${symbol}-${timeframe}`" :rows="candles" :label="chartLabel" />
+    <CandleChart ref="chartRef" :key="chartKey" :rows="candles" :label="chartLabel" />
   </main>
 </template>
 
 <style scoped>
 main { font-family: system-ui, sans-serif; }
-.controls { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin: 0.5rem 0; }
+.modes, .controls { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin: 0.5rem 0; }
+.modes button.active { font-weight: bold; outline: 2px solid #1b7f5a; }
 .hint { font-size: 0.8rem; color: #666; }
+.notice { padding: 0.5rem 0.75rem; background: #fff4e5; border: 1px solid #f0c48a; max-width: 880px; }
 .status { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; margin: 0.5rem 0 1rem; font-size: 0.9rem; }
 .status dt { font-size: 0.7rem; color: #666; text-transform: uppercase; }
 .status dd { margin: 0; font-variant-numeric: tabular-nums; }

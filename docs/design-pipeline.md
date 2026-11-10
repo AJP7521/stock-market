@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 8)
+## What exists today (after Prompt 9)
 
 ```
 browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
@@ -74,7 +74,9 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | Live feed inside FastAPI (yfinance subscribe, own receive loop, records to SQLite, feed status) | `backend/live.py` | exists |
 | WebSocket `/api/ws/candles?symbol&timeframe` (candle + feed messages) | `backend/app.py` | exists |
 | Timeframe selector, live status bar, in-place candle updates | `frontend/src/App.vue`, `CandleChart.vue` | exists |
-| Replay | – | planned (Prompt 9) |
+| Read-only replay (receipt order, as-of each arrival) + `/api/replay`, `/api/replay/sessions` | `backend/replay.py`, `backend/app.py` | exists |
+| Replay mode in the dashboard (Replay label, step, replay clock, source time, flags) | `frontend/src/App.vue` | exists |
+| `LIVE_FEED=off` switch (no Yahoo connection) | `backend/app.py` | exists |
 | Indicators, paper account, P&L | – | planned (Prompts 9A–9D) |
 | Decisions, review, automation | – | planned (Prompts 10–12) |
 | Voice | – | planned (Prompt 13) |
@@ -129,3 +131,15 @@ App.vue (status bar, timeframe selector) --> CandleChart.upsert(row): series.upd
 ```
 
 Feed states: `connecting`, `live`, `quiet` (connected, no message for 30 s), `disconnected` (dropped; retry every 5 s), `paused` (test control), and `offline` (SAMPLE). The browser shows the feed state separately from its own FastAPI socket state.
+
+## Replay path (Prompt 9)
+
+```
+SQLite (opened mode=ro) --receipts ORDER BY seq, source time in [start,end)--> replay.replay()
+   for each arrival:  as_of = its receipt time
+       build_minute_candles(observations seen so far, as_of) -> aggregate(timeframe, as_of)
+       -> step {replay_time, observation{source_time, late, revises_id, is_repeat}, candle, status}
+GET /api/replay ---> App.vue plays steps at N steps/s ---> CandleChart.upsert (historical updates allowed)
+```
+
+Replay uses the same candle code and availability rules as live, so a late observation or a revision changes its candle at the step where it originally arrived.

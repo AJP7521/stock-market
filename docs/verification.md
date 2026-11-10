@@ -256,3 +256,49 @@ HTTP checks through the Vite proxy (`curl http://127.0.0.1:5173/api/history?...`
 **Not yet exercised:**
 - **Unrequested drop:** the `disconnected` path, when the upstream drops by itself (network loss, Yahoo closing the connection), is coded with a 5 s retry but was only exercised through the `paused` test control.
 - **`quiet` state:** shown after 30 s without messages, for example after the close. It was not observed.
+
+---
+
+## Prompt 9 · Replay a recorded session from SQLite (2026-11-10)
+
+**Code:**
+- `backend/replay.py` (new):
+  - opens the database with `file:…?mode=ro`
+  - steps through the selected symbol's arrivals in `receipts.seq` order, filtered by source time in [start, end)
+  - at each step runs the existing `candles.build_minute_candles` → `timeframes.aggregate` as of that arrival's receipt time, so late arrivals and revisions show up at the step where they originally arrived
+- `backend/app.py`:
+  - `GET /api/replay/sessions`
+  - `GET /api/replay?symbol&start&end&timeframe`
+  - `LIVE_FEED=off` starts the backend with no Yahoo connection; `/api/health` reports `live_feed`
+- `frontend/src/App.vue`: Live/Replay mode buttons. Replay has symbol, From/To in UTC prefilled from the recording, steps per second, Start, Pause and Skip to end, and a status bar with the step number, replay clock (receipt time), source time, price, and late/revision/repeat flags. The chart is labelled "Replay · AAPL · 1m". An empty selection shows a message.
+- `CandleChart.vue`: the chart refits when a new candle is appended.
+
+No packages were installed.
+
+### Unit tests (constructed **test data**, disposable DB)
+`python3 -m unittest discover -s backend/tests -t . -v` → **27 tests, OK** (5 new in `test_replay.py`):
+- **Order and late arrival:** steps follow receipt order. The late 15:00:20 observation, received at 15:01:10.3, changes the 15:00 candle at step 5 from high 101 to 100/103/100/101/11.
+- **Repeat:** an exact repeat is a step but changes nothing.
+- **Revision:** an identified revision changes the high to 102.5 at its own step.
+- **Repeatable and read-only:** two runs give identical results; the DB file hash is unchanged; a write through the replay connection raises `OperationalError` (read-only).
+- **Empty selection:** returns `empty: true`.
+
+### Recorded **live** session replayed with the live feed off
+- **Backend:** `LIVE_FEED=off python3 -m uvicorn backend.app:app --host 127.0.0.1 --port 8000`. `/api/health` returned `"live_feed": false`, and the log shows no feed activity.
+- **Selection:** AAPL, 2026-11-10T19:18:00Z → 19:31:00Z, 1m; 115 observations / 115 receipts (Yahoo, recorded in Prompts 6 and 8).
+- **Chosen interval:** 2026-11-10T19:29:00Z.
+- **Expected, from SQLite (read-only):** close = the last price by source time in 19:29 = **348.42**. Volume = last running total 16708017 − baseline 16687426 (at 19:28:47Z, in the preceding minute) = **20591**. There are 40 observations in the minute.
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| 1 | Replay run 1 in the browser (50 steps/s) | "Replay" label; observation time shown; 19:29 close 348.42, volume 20591 | "Replay · AAPL · 1m"; progress 115 / 115; replay time 19:30:19.051Z; source 19:30:17.000Z; legend at 19:29: `O 348.355 H 348.43 L 348.32 C 348.42 Vol 20591` | **pass** |
+| 2 | Replay run 2 (same selection) | same result | identical legend, 115 / 115, same replay time | pass |
+| 3 | API response, run 1 vs run 2 | identical | both SHA-256 `0b976057…a7ef`; observation_count 115, receipt_count 115 | pass |
+| 4 | Stored counts and files before vs after | unchanged | observations 115 → 115; receipts 115 → 115; `market.sqlite` SHA-256 `af252936…c6f4` before and after (same for `-shm`/`-wal`) | pass (read-only) |
+| 5 | Last candle at the end of the replay | 19:30 still forming at replay time 19:30:19Z | `forming` | pass |
+| 6 | Empty selection (20:00–20:05Z) | message | "AAPL has no recorded observations between 2026-11-10T20:00:00.000Z and 2026-11-10T20:05:00.000Z." | pass |
+| 7 | Console and backend log | no errors | none | pass |
+
+**Still requiring an actual capture:** the recorded live session contains no repeats, late arrivals or revisions (0 of 115). Those behaviours are verified only with test data. Seeing them in a real capture needs a session where Yahoo actually delivers one.
+
+**First-run fix:** before the fix, the first replay candle sat at the right edge because the chart didn't refit when a candle was appended. `upsert()` now calls `fitContent()` for new candles.
