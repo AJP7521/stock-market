@@ -87,3 +87,34 @@ Data: the three **synthetic** one-minute candles from `GET /api/history` (Prompt
 | 7 | Console | browser console | no errors | no messages | pass |
 
 AutoLoop cycle 1 (check 4): the first screenshot showed all candles squeezed against the right edge. Cause: `fitContent()` ran before `autoSize` had measured the container. Fix: run `fitContent()` in `requestAnimationFrame`. The rerun passed.
+
+---
+
+## Prompt 5 · Receive a Yahoo Finance update (2026-11-10)
+
+Installed with student approval: `python3 -m pip install -r backend/requirements.txt`, after adding `yfinance==1.8.0`. All 20 packages came from prebuilt wheels into the system Python 3.14 site-packages.
+
+| # | Check | Command | Expected | Observed | Result |
+|---|---|---|---|---|---|
+| 1 | Import and versions in the backend interpreter | `python3 -c "import yfinance, websockets, google.protobuf ..."` | importable | yfinance 1.8.0, websockets 17.4, protobuf 7.36.2 | pass |
+| 2 | Time-limited **live** subscription (no login) | `python3 -m backend.yahoo_stream AAPL --timeout 60` (started 2026-11-10 19:16:02 UTC, 14:16 ET, regular session) | connection opens; one AAPL update, or receipt marked unverified | connection opened; update received after about 1.5 s | **pass (live)** |
+
+One received update (**live Yahoo data**, not test data):
+
+| Field | Value |
+|---|---|
+| ticker (`id`) | AAPL (exchange `NMS`) |
+| price | 348.01 |
+| source time (`time`) | `1794338162000` = 2026-11-10T19:16:02.000Z |
+| backend receipt time | 2026-11-10T19:16:03.453Z (receipt − source = 1454 ms) |
+| `day_volume` | `16325014` |
+| `last_size` | `45` |
+| `market_hours` | 1 |
+
+**Time units:** `time` is int64 **milliseconds** since the Unix epoch, in UTC. The backend receipt time is taken with `datetime.now(timezone.utc)` when the handler runs. Yahoo's timestamp here is whole seconds (it ends in `000`).
+
+**Volume:** `day_volume` is the **running total of shares traded in the current session**, not the size of this trade. 16.3 million shares by mid-afternoon is a session figure, while `last_size` = 45 is the size of the single latest trade. Prompt 7 turns the running total into per-minute volume by differencing.
+
+**Format:** int64 fields arrive as **strings** (`MessageToDict` behaviour) and must be converted to integers before storage or arithmetic.
+
+Still to verify: how the stream behaves outside the regular session, such as `market_hours` values and the gaps between messages.

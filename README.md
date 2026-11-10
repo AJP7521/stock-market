@@ -29,7 +29,7 @@ No real money or brokerage account is involved at any stage.
 | Storage | SQLite via Python's built-in `sqlite3` | available (SQLite 3.50.4) |
 | Frontend | Vue 3.5.45, built with Vite 8.3.7 and @vitejs/plugin-vue 6.0.10 | installed (`frontend/package.json`, lockfile) |
 | Charting | TradingView Lightweight Charts 5.2.1 | installed (`frontend/package.json`, lockfile) |
-| Market data | `yfinance` WebSocket client | **not installed** – Prompt 5 |
+| Market data | yfinance 1.8.0 `AsyncWebSocket` (websockets 17.4, protobuf 7.36.2) | installed (`backend/requirements.txt`) |
 | AI provider | OpenAI API (key kept in the backend environment) | **not installed** – Prompt 10 |
 
 ## Prerequisites found on this computer (2026-11-10)
@@ -56,6 +56,7 @@ stock-market/
 |-- backend/                  Python application logic and FastAPI routes
 |   |-- app.py                FastAPI app (GET /api/health, GET /api/history)
 |   |-- history.py            CSV loader for one-minute candles
+|   |-- yahoo_stream.py       Yahoo Finance stream receiver (time-limited check)
 |   `-- requirements.txt      Pinned Python dependencies
 |-- frontend/                 Vue components, user input, and presentation
 |   |-- package.json          npm manifest (package-lock.json pins exact versions)
@@ -118,6 +119,12 @@ One-minute sample candles (synthetic) from `prompts/data/sample-candles.csv`:
 
 ```bash
 curl http://127.0.0.1:8000/api/history
+```
+
+Live Yahoo Finance check (no login; prints the first update, then disconnects, or reports receipt as unverified):
+
+```bash
+python3 -m backend.yahoo_stream AAPL --timeout 60
 ```
 
 Stop: press `Ctrl+C` in each terminal, or stop whatever is listening on the two ports:

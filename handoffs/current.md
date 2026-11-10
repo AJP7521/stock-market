@@ -1,21 +1,19 @@
 # Current state: 2026-11-10
 
-**Last prompt:** 04 · Integrate the candlestick chart (complete, not committed). Prompts 1–3 are committed (latest `8f6de53`).
+**Last prompt:** 05 · Connect Yahoo Finance (complete, not committed). Prompts 1–4 are committed (latest `44e927c`).
 
-## Files created or changed (Prompt 4)
-- New: `frontend/src/CandleChart.vue` (candles, volume and a hover legend; TradingView attribution),
-  `frontend/src/chartAdapter.js` (UTC ISO → UTCTimestamp; same time for both series)
-- Updated: `frontend/src/App.vue` (loads `/api/history`), `frontend/package.json` and `package-lock.json`
-  (lightweight-charts 5.2.1, approved), `README.md`, `docs/design-pipeline.md`, `docs/verification.md`
+## Files created or changed (Prompt 5)
+- New: `backend/yahoo_stream.py` (yfinance `AsyncWebSocket`; `first_update()` time-limited check; CLI)
+- Updated: `backend/requirements.txt` (+ `yfinance==1.8.0`, approved and installed), `README.md`,
+  `docs/design-pipeline.md`, `docs/verification.md`
 
 ## Checks performed
-The build passes. In the browser, 14:30, 14:31 and 14:32 show as separate candles with volume bars, and hovering
-14:31 shows C 101 and Vol 850, matching the CSV. Attribution links are present, the console is clean, and one AutoLoop
-fix was needed (fitContent timing). Services were stopped afterwards.
+A live AAPL update arrived at 19:16 UTC: price 348.01, source time 1794338162000 ms (19:16:02Z), received 1.45 s later,
+day_volume 16325014 (running session total), last_size 45. Details are in `docs/verification.md`.
 
 ## Outstanding questions
-- The student needs to review and approve the Prompt 4 commit.
-- The chart legend has `data-testid` hooks ready for the Prompt 14 SmokeTest. No automated browser test exists yet.
+- The student needs to review and approve the Prompt 5 commit.
+- Behaviour outside the regular session (`market_hours`, message gaps) is not observed yet.
 
 ## Next task
-Prompt 05 · Connect Yahoo Finance: yfinance WebSocket subscription for AAPL (needs install approval).
+Prompt 06 · Record observations in SQLite (`sqlite3`, built in): store every received message with source and receipt time.
