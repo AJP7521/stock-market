@@ -6,6 +6,12 @@
 git clone https://github.com/AJP7521/stock-market.git
 ```
 
+## Demo video
+
+[Watch the demo video (`docs/media/assignment-1.mov`, 1 min 37 s, 10.6 MB)](docs/media/assignment-1.mov)
+
+A screen recording of the workstation. All trading shown is simulated (paper account).
+
 ## Summary
 
 A single local, AI-assisted market workstation and paper-trading bot, built as a course exercise in which the student
