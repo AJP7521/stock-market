@@ -826,9 +826,10 @@ is exactly what `speechSynthesis` read aloud.
 All four live sessions ended with "ended by the student" (End voice). No errors in the backend log; the key does not
 appear in the DB or logs. Services stopped.
 
-**Not confirmed / not exercised:** the student's report of Chrome's microphone indicator after End (release was
-verified with the mocked track state); a real permission denial in Chrome (mocked only); the speech-recognition
-`network` error path.
+**Microphone release (live):** the student confirmed on 2026-11-13 that Chrome's microphone icon went away after
+End voice (also verified earlier with the mocked track state).
+
+**Not exercised:** a real permission denial in Chrome (mocked only); the speech-recognition `network` error path.
 
 ---
 

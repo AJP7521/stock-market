@@ -20,7 +20,6 @@ passed 48/48 with a clean account each time; cleanup verified after passes and f
 ## Outstanding questions
 - The student needs to review and approve the Prompt 14 commit.
 - The GitHub Actions workflow has not run: there is no Git remote yet (push needs the student's approval).
-- Not confirmed: Chrome's microphone indicator after End voice (Prompt 13).
 
 ## Next task
 None in `prompts/`. Possible next steps: push to GitHub to run CI; decide on the pre-existing "database is locked"
