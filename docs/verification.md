@@ -614,3 +614,66 @@ The backend was restarted on the same disposable DB without `DECISIONS_PROVIDER`
   was not run in replay).
 - The chart shows the dashboard's own "Cross up" markers, so the model can read the crossover from the marker as
   well as from the lines.
+
+---
+
+## Prompt 11 · Second-agent review of a proposed decision (2026-11-12)
+
+### CHECK
+No package needed: the reviewer reuses the provider client (`ClaudeDecisions`, `OpenAIDecisions` or the test
+double), the provider-neutral request/response format and the `decisions` row. Change: the Claude client now uses
+`max_retries = 0` (was 1), so each role makes at most one HTTP call.
+
+### Unit tests (**test data**, **provider test double** with fixed replies)
+`python3 -m unittest discover -s backend/tests -t .` → **90 tests, OK** (8 new in `test_review.py`):
+- **Case 1, agreed eligible proposal** (`action=buy, verdict=accept`, $1,000): exactly 2 calls; the analyst was asked
+  `action`, the reviewer `verdict` with different instructions; the reviewer received the analyst's choice `buy`, the
+  backend facts (order cost 19.0) and a snapshot identical to the analyst's; final check eligible; evidence
+  "cash $1,000.00 ≥ cost of 1 share(s) at close $19.00 = $19.00"; SQLite row has the snapshot ID, both model names,
+  verdict and reviewer status; 0 orders.
+- **Case 2, reviewer rejection** (`reject_unsupported_signal`): account rules valid, ineligible; the only failed gate
+  is "reviewer accepted".
+- **Case 3, unaffordable buy accepted by both** ($10 test account, close $19): validation invalid, ineligible; the only
+  failed gate is the cash rule; evidence "cash $10.00 < cost of 1 share(s) at close $19.00 = $19.00".
+- Reviewer timeout (1 call), out-of-list verdict and missing verdict → ineligible.
+- Strategy rule enforced when both accept: `wait` on an up crossover while flat → ineligible.
+- No proposal (analyst gave no action) → reviewer `not_run`, only 1 call.
+- Chart question: the reviewer got the identical image part and the analyst's named answers; the stored reviewer
+  request holds the image as a file reference.
+- `review=False` keeps Prompt 10 behaviour (one call, no review sections).
+
+### Fixed replies through the HTTP API (**test data**, **mocked provider**)
+Disposable DB with the TESTSMA fixture; one backend start per case with `DECISIONS_PROVIDER=test`; snapshot as of
+2026-11-09T15:05:10Z (candle 15:04, close 19, SMA2 16 > SMA3 13, crossover up); `POST /api/decisions {"snapshot_id"}`.
+
+| Case | Settings | Saved row (analyst / reviewer / final) | Failed gates | Result |
+|---|---|---|---|---|
+| 1 agreed eligible | `action=buy,verdict=accept`, account `paper` $1,000 | decision 1, snapshot 1: buy valid / accept reviewed / eligible 1 | none | pass |
+| 2 reviewer rejection | `action=buy,verdict=reject_unsupported_signal`, `paper` $1,000 | decision 2, snapshot 2: buy valid / reject_unsupported_signal / eligible 0 | reviewer accepted | pass |
+| 3 unaffordable buy, both accept | `action=buy,verdict=accept`, account `poor` $10 | decision 3, snapshot 3: buy invalid / accept reviewed / eligible 0 | account rule: cash covers 1 share(s) at the candle close ($19.00) | pass |
+
+Evidence saved for case 3: "cash $10.00 < cost of 1 share(s) at close $19.00 = $19.00". All rows `call_kind = mock`,
+model `test-double`. `paper_orders` 0, `paper_fills` 0.
+
+### Live two-call example (**live model calls** on **test market data**)
+Backend on the same disposable DB with Claude from `.env`; in the browser (1280×900 viewport, pane hidden):
+TESTSMA, SMA 2/3, cutoff 15:04, **Ask about chart**.
+
+| | Analyst (call 1) | Reviewer (call 2) |
+|---|---|---|
+| provider / model / kind | anthropic / claude-opus-5-5 / live | anthropic / claude-opus-5-5 / live |
+| actual reply text | `{"action":"buy","crossover":"up","evidence":"sufficient"}` | `{"verdict":"accept"}` |
+| stop / tokens in-out / latency | end_turn / 3015–28 / 2644 ms | end_turn / 2936–13 / 2577 ms |
+| snapshot received | identical to saved snapshot 4 | identical to saved snapshot 4 |
+| image | stored capture (reference) | the same reference |
+
+- Saved snapshot 4: candle 2026-11-09T15:04:00Z close 19, SMA2 16 / SMA3 13, crossover up, cash 1000, position 0.
+  Both outputs agree with it: buy on an up crossover, affordable; crossover answer up = Python's.
+- The reviewer received the analyst's `{'proposal': 'buy', 'named_answers': {'action': 'buy', 'crossover': 'up',
+  'evidence': 'sufficient'}}`.
+- Screen: "Verdict accept · model call: live (anthropic, claude-opus-5-5, 2577 ms)", evidence lines, final-check table
+  with all 11 gates passing, "Eligible for automated execution". SQLite decision 4: verdict accept, reviewer_status
+  reviewed, final eligible true, eligible_for_order 1. No fallback blocks. 0 orders, 0 fills.
+- The key does not appear in the DB or logs. Backend, Vite and the browser tab were stopped/closed.
+
+**Not exercised:** a live rejection or live timeout (covered by mocked tests); a live OpenAI review.

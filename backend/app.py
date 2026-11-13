@@ -435,6 +435,7 @@ class DecisionIn(BaseModel):
     as_of: str | None = None
     image_png: str | None = None      # Prompt 10A: data:image/png;base64,... captured from the snapshot's chart
     capture: dict | None = None       # what the browser captured: snapshot_id, symbol, interval, cutoff
+    review: bool = True               # Prompt 11: a second (reviewer) call must accept the analyst's proposal
 
 
 @app.post("/api/decisions")
@@ -452,7 +453,8 @@ def create_decision(body: DecisionIn) -> dict:
         if body.image_png is not None and body.snapshot_id is None:
             raise HTTPException(422, "a chart image needs the snapshot_id it was captured from")
         try:
-            return decide(conn, snapshot_id, make_provider(), image=body.image_png, capture=body.capture)
+            return decide(conn, snapshot_id, make_provider(), image=body.image_png, capture=body.capture,
+                          review=body.review)
         except ImageRejected as exc:      # nothing stored, no provider call
             raise HTTPException(422, {"problem": exc.problem, "recapture": exc.recapture}) from None
     finally:

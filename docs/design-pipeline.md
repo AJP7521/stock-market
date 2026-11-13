@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 10A)
+## What exists today (after Prompt 11)
 
 ```
 browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
@@ -94,7 +94,9 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | PNG check (base64, signature, chunk CRCs, IHDR/IEND, decompressed size) and capture storage beside the database | `backend/chart_images.py` | exists |
 | Three chart questions (action, crossover, evidence), checks by name, eligibility; provider test double (`DECISIONS_PROVIDER=test`) | `backend/decisions.py`, `GET /api/decisions/{id}/image` | exists |
 | Ask about chart panel: off-screen render of the frozen snapshot, `takeScreenshot` PNG, preview, questions, answers, checks | `frontend/src/AskChartPanel.vue`, `CandleChart.vue` (`capture()`), `App.vue` | exists |
-| Review, automation | – | planned (Prompts 11–12) |
+| Reviewer: second, separate call through the same provider client (verdict question), strategy rules, final check with every gate; saved under the same decision ID | `backend/review.py`, `backend/decisions.py` (`decide(review=True)`), `POST /api/decisions` (`review` defaults to true) | exists |
+| Reviewer verdict, observed values and final-check table in the panel | `frontend/src/AskChartPanel.vue` | exists |
+| Paper automation from reviewed decisions | – | planned (Prompt 12) |
 | Voice | – | planned (Prompt 13) |
 | SmokeTest command | – | planned (Prompt 14) |
 
@@ -252,4 +254,22 @@ AskChartPanel (cutoff = a completed candle, candles shown = N)
        check_rules(action) + chart_checks(crossover vs Python crossover, readable, evidence sufficient)
        decisions row: answers, questions, chart checks, image path + sha256 (request stored with a file reference)
   4. panel shows what was asked, the answers, the checks and eligibility. Paper tables are never written.
+```
+
+## Review path (Prompt 11)
+
+```
+decide(snapshot_id, provider, image?, review=True)
+  analyst  : build_request (STRATEGY text, snapshot, image?, action [+ crossover, evidence])  -> provider.send  (call 1)
+             -> status decided | malformed_answer | timeout | provider_error
+  reviewer : only if the analyst decided
+             build_review_request (REVIEWER_INSTRUCTIONS; same image; input_json {analyst: proposal + named answers,
+             backend_facts + order_cost_at_close, snapshot: the SAME model_input}) -> provider.send  (call 2)
+             -> reviewed (verdict) | malformed_answer | timeout | provider_error | not_run
+  Python   : check_rules (account) + strategy_checks + chart_checks + reviewer valid + verdict == accept
+             + application snapshot -> final_check {eligible, gates}; verdict_evidence (observed values)
+  SQLite   : one decisions row: analyst request/response, reviewer_model, reviewer_status, verdict,
+             review_json (reviewer request with the image as a file reference, response, latency, evidence),
+             strategy_json, final_check_json, eligible_for_order. Paper tables untouched.
+Each role: one HTTP call, DECISIONS_TIMEOUT_S timeout, max_retries = 0.
 ```

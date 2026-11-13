@@ -136,6 +136,12 @@ ADDED_COLUMNS = {
     "chart_checks_json": "TEXT",       # chart-answer checks (Prompt 10A)
     "image_path": "TEXT",              # capture PNG, relative to the database folder
     "image_json": "TEXT",              # width, height, bytes, sha256 of the capture
+    "reviewer_status": "TEXT",         # Prompt 11: reviewed | malformed_answer | timeout | provider_error | not_run
+    "verdict": "TEXT",                 # the reviewer's verdict
+    "reviewer_model": "TEXT",
+    "review_json": "TEXT",             # reviewer request (image as a reference), response, latency, evidence
+    "strategy_json": "TEXT",           # strategy-rule checks of the proposal
+    "final_check_json": "TEXT",        # every gate with pass/fail, and the final eligibility
 }
 
 
@@ -412,7 +418,7 @@ class ClaudeDecisions:
     call_kind = "live"
 
     def __init__(self, api_key: str | None = None, model: str | None = None, base_url: str | None = None,
-                 timeout_s: float | None = None, max_retries: int = 1):
+                 timeout_s: float | None = None, max_retries: int = 0):   # one HTTP call per role
         self.api_key = api_key if api_key is not None else os.environ.get("ANTHROPIC_API_KEY", "")
         self.model = model or os.environ.get("DECISIONS_MODEL") or CLAUDE_DEFAULT_MODEL
         self.base_url = base_url
@@ -612,13 +618,17 @@ def chart_checks(answers: dict, snapshot: dict) -> list[dict]:
 
 
 def decide(conn: sqlite3.Connection, snapshot_id: int, provider, image: str | None = None,
-           capture: dict | None = None) -> dict:
+           capture: dict | None = None, review: bool = False, reviewer=None) -> dict:
     """Ask the provider about one stored snapshot, validate the answers and store the decision.
 
     With `image` (a PNG data URL captured from the snapshot's chart) the request carries the image and three
     questions. An unreadable image or a capture of a different snapshot raises ImageRejected before any provider
     call, and nothing is stored.
+
+    With `review`, a second call (the reviewer, Prompt 11; `reviewer` defaults to the same provider client) judges
+    the analyst's proposal, and the decision is eligible only if every gate in review.final_check passes.
     """
+    from backend import review as rv
     ensure_schema(conn)
     snapshot = load_snapshot(conn, snapshot_id)
     base = {"snapshot_id": snapshot_id, "created_ms": now_ms(), "provider": provider.name,
@@ -670,18 +680,45 @@ def decide(conn: sqlite3.Connection, snapshot_id: int, provider, image: str | No
     eligible = (valid and snapshot["kind"] == "application" and snapshot["complete"]
                 and all(c["passed"] for c in visual))
     image_ref = (f"stored:{image_path} sha256:{image_info['sha256']}" if image_path else None)
+
+    review_row, strategy, final = {}, [], None
+    if review:
+        reviewer = reviewer or provider
+        strategy = rv.strategy_checks(proposal, snapshot) if status == "decided" else []
+        if status == "decided":
+            rbody = rv.build_review_request(snapshot, reviewer.model, model_input(snapshot), facts(snapshot),
+                                            proposal, answers, provider.model, image)
+            outcome = rv.run_review(reviewer, rbody, (ProviderTimeout, ProviderError))
+            outcome["request"] = stored_request(rbody, image_ref)
+        else:
+            outcome = {"status": "not_run", "verdict": None, "error": f"no proposal to review ({status})",
+                       "response": None, "latency_ms": None, "request": None, "provider": reviewer.name,
+                       "model": reviewer.model, "call_kind": reviewer.call_kind}
+        outcome["evidence"] = rv.verdict_evidence(outcome["verdict"], proposal, snapshot)
+        final = rv.final_check(analyst_status=status, account=checks, strategy=strategy, chart=visual,
+                               kind=snapshot["kind"], review=outcome)
+        eligible = eligible and final["eligible"]
+        review_row = {"reviewer_status": outcome["status"], "verdict": outcome["verdict"],
+                      "reviewer_model": outcome["model"], "review_json": json.dumps(outcome),
+                      "strategy_json": json.dumps(strategy), "final_check_json": json.dumps(final)}
+    explanation = explain(snapshot, status, proposal, checks, provider.model, error, answers if image else None,
+                          visual)
+    if final is not None:
+        explanation += (f" Reviewer ({review_row['reviewer_model']}): "
+                        + (review_row["verdict"] or f"no verdict ({review_row['reviewer_status']})") + ". "
+                        + ("Final check: eligible." if final["eligible"] else "Final check: not eligible: "
+                           + "; ".join(g["gate"] for g in final["gates"] if not g["passed"]) + "."))
     return _store_decision(
         conn, **base, status=status, proposal=proposal,
         probabilities_json=json.dumps(probabilities) if probabilities is not None else None,
         confidence=confidence, validation_status=("valid" if valid else "invalid") if status == "decided"
         else "not_checked", validation_json=json.dumps(checks), eligible_for_order=int(eligible),
-        explanation=explain(snapshot, status, proposal, checks, provider.model, error, answers if image else None,
-                            visual),
+        explanation=explanation,
         facts_json=json.dumps(facts(snapshot)), request_json=json.dumps(stored_request(body, image_ref)),
         response_json=json.dumps(response) if response is not None else None, error=error, latency_ms=latency,
         questions_json=json.dumps(body["questions"]), answers_json=json.dumps(answers),
         chart_checks_json=json.dumps(visual), image_path=image_path,
-        image_json=json.dumps(image_info) if image_info else None)
+        image_json=json.dumps(image_info) if image_info else None, **review_row)
 
 
 def get_decision(conn: sqlite3.Connection, decision_id: int) -> dict | None:
@@ -705,5 +742,8 @@ def get_decision(conn: sqlite3.Connection, decision_id: int) -> dict | None:
         "image": ({**json.loads(r["image_json"]), "path": r["image_path"], "url": f"/api/decisions/{r['id']}/image"}
                   if r["image_path"] else None),
         "request_sent": json.loads(r["request_json"]) if r["request_json"] else None,
+        "review": ({**json.loads(r["review_json"]), "strategy_checks": json.loads(r["strategy_json"] or "[]")}
+                   if r["review_json"] else None),
+        "final_check": json.loads(r["final_check_json"]) if r["final_check_json"] else None,
         "snapshot": load_snapshot(conn, r["snapshot_id"]) if r["snapshot_id"] is not None else None,
     }

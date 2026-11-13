@@ -118,10 +118,13 @@ const answerRows = computed(() => {
   })
 })
 
-const failedChecks = computed(() => [
-  ...(decision.value?.validation.checks ?? []).filter((c) => !c.passed).map((c) => c.rule),
-  ...(decision.value?.chart_checks ?? []).filter((c) => !c.passed).map((c) => c.rule),
-])
+const failedChecks = computed(() => decision.value?.final_check
+  ? decision.value.final_check.gates.filter((g) => !g.passed).map((g) => g.gate)
+  : [
+      ...(decision.value?.validation.checks ?? []).filter((c) => !c.passed).map((c) => c.rule),
+      ...(decision.value?.chart_checks ?? []).filter((c) => !c.passed).map((c) => c.rule),
+    ])
+const review = computed(() => decision.value?.review ?? null)
 
 const sentText = computed(() => decision.value?.request_sent?.input?.[1]?.content
   ?.filter((p) => p.type === 'input_text').map((p) => p.text).join(' ') ?? '')
@@ -132,7 +135,7 @@ const strategy = computed(() => decision.value?.request_sent?.input?.[0]?.conten
 
 <template>
   <section class="ask" data-testid="ask-chart">
-    <h2>Ask about chart</h2>
+    <h2>Ask about chart (analyst + reviewer)</h2>
     <form class="controls" @submit.prevent="ask">
       <label>
         Cutoff candle (completed)
@@ -209,6 +212,34 @@ const strategy = computed(() => decision.value?.request_sent?.input?.[0]?.conten
         </tbody>
       </table>
 
+      <template v-if="review">
+        <h3>Reviewer (second, separate call)</h3>
+        <p data-testid="ask-review">
+          Verdict <strong data-testid="ask-review-verdict" :class="review.verdict === 'accept' ? 'ok' : 'bad'">
+            {{ review.verdict ?? `none (${review.status})` }}</strong>
+          · model call: <strong :class="review.call_kind === 'mock' ? 'warn' : ''" data-testid="ask-review-call-kind">
+            {{ review.call_kind === 'mock' ? 'MOCK (provider test double)' : 'live' }}</strong>
+          ({{ review.provider }}, {{ review.model }}<template v-if="review.latency_ms !== null">,
+          {{ review.latency_ms }} ms</template>)
+          <span v-if="review.error" class="bad"> · {{ review.error }}</span>
+        </p>
+        <p class="hint">The reviewer received the analyst's choice and named answers, the backend facts, the same
+          snapshot #{{ decision.snapshot_id }}<template v-if="decision.image"> and the same PNG</template>.</p>
+        <ul class="hint" data-testid="ask-review-evidence">
+          <li v-for="line in review.evidence" :key="line">Observed: {{ line }}</li>
+        </ul>
+        <table v-if="decision.final_check" class="answers" data-testid="ask-final-check">
+          <caption>Final check by Python (every gate must pass)</caption>
+          <thead><tr><th>Gate</th><th>Observed</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr v-for="g in decision.final_check.gates" :key="g.gate">
+              <td>{{ g.gate }}</td><td>{{ g.observed }}</td>
+              <td :class="g.passed ? 'ok' : 'bad'">{{ g.passed ? 'pass' : 'FAIL' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </template>
+
       <p data-testid="ask-eligibility">
         <strong v-if="decision.eligible_for_order" class="ok">Eligible for automated execution</strong>
         <template v-else>
@@ -234,6 +265,7 @@ h3 { font-size: 0.95rem; margin: 0.75rem 0 0.25rem; }
 .capture img { max-width: 100%; border: 1px solid #ccc; display: block; }
 .capture figcaption { font-size: 0.85rem; margin-top: 0.3rem; }
 .answers { border-collapse: collapse; font-size: 0.85rem; margin-top: 0.5rem; }
+.answers caption { text-align: left; font-size: 0.8rem; color: #666; }
 .answers th, .answers td { border: 1px solid #ddd; padding: 0.25rem 0.5rem; text-align: left; vertical-align: top; }
 pre { font-size: 0.75rem; max-height: 16rem; overflow: auto; background: #f7f7f7; padding: 0.5rem; }
 .notice { padding: 0.5rem 0.75rem; margin: 0.5rem 0; }

@@ -188,6 +188,24 @@ curl -X POST http://127.0.0.1:8000/api/decisions -H 'Content-Type: application/j
 `malformed_answer`, `timeout`, `provider_error`, `missing_input`. A live model can be asked about **test** market data;
 the response labels the market data source and the provider call separately.
 
+### Agent review (analyst + reviewer)
+
+`POST /api/decisions` makes **two separate model calls** by default (`"review": false` turns the reviewer off). The
+**analyst** proposes buy, sell, hold, wait or close. The **reviewer** has its own instructions and receives the same
+frozen snapshot, the analyst's actual choice and named answers, the backend facts (including the cost of one order at
+the candle close) and, for a chart question, the same PNG. It answers one verdict: `accept`,
+`reject_insufficient_cash`, `reject_insufficient_position` or `reject_unsupported_signal`. Each role gets one call
+with the `DECISIONS_TIMEOUT_S` timeout and no retries.
+
+Python then runs a **final check**: the analyst's valid action, the account rules, the strategy rules (an up crossover
+allows buy; a down crossover allows close or sell of an open position; otherwise hold or wait), the chart checks, a
+valid reviewer reply and an `accept` verdict. A rejection, timeout or invalid reply makes the proposal ineligible, and
+an accepted proposal that breaks a rule is still ineligible. The response's `review` and `final_check` sections, and
+the Ask about chart panel, show the verdict, the observed values behind it and every gate. Nothing is ordered.
+
+To try the review with fixed replies, start the backend with `DECISIONS_PROVIDER=test` and, for example,
+`DECISIONS_TEST_ANSWERS=action=buy,verdict=reject_unsupported_signal`.
+
 ### Ask about chart (chart image + three questions)
 
 Below the chart, **Ask about chart** freezes a decision snapshot at the selected **completed** candle (the cutoff),
@@ -216,7 +234,9 @@ MARKET_DB=/tmp/ask-demo.sqlite LIVE_FEED=off DECISIONS_PROVIDER=test python3 -m 
 ```
 
 Open `http://127.0.0.1:5173/?symbol=TESTSMA&interval=1m`, set the SMAs to 2 and 3, pick the 15:04 cutoff and click
-**Ask about chart**. The answers are marked **MOCK (provider test double)**. Leave out `DECISIONS_PROVIDER=test` to
+**Ask about chart**. The answers are marked **MOCK (provider test double)**; the test double's default answers include
+no verdict, so add `DECISIONS_TEST_ANSWERS=action=buy,crossover=up,evidence=sufficient,verdict=accept` to see an
+accepted review. Leave out `DECISIONS_PROVIDER=test` to
 ask Claude.
 
 ### Configurable indicators
