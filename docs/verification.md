@@ -474,3 +474,68 @@ Orders were placed with the paper panel's buttons. Prices were **test data** pos
 - **Before vs after restart:** the backend was restarted and the page reloaded. The screen showed the same five rows, and the SQLite query output was identical before and after (`diff` empty). 5 P&L rows, 3 fills, observations all `source = test`.
 - **Discrepancies:** none. The backend logs show no errors.
 - **Not exercised in the browser:** the `unavailable` valuation, which needs an open position without any usable price. It is covered by a unit test.
+
+---
+
+## Prompt 10 · Decision API: frozen snapshot plus model proposal (2026-11-12)
+
+### Provider choice
+The prompt describes an OpenAI implementation (`POST /v1/decisions` with a named choice question). The student chose to
+use a **Claude API key**. Both providers are implemented behind one provider-neutral request (`build_request`), and
+`DECISIONS_PROVIDER` selects one. **Claude is the default** (unset, `claude` or any value other than `openai`) →
+`ClaudeDecisions` (Messages API, structured output whose only field is `action` ∈ {buy, sell, hold, wait, close});
+`DECISIONS_PROVIDER=openai` → `OpenAIDecisions`. The student uses Claude only; the optional OpenAI path is unit-tested
+but has **not** been called live (no OpenAI key).
+
+### CHECK → TAKE ACTION → VERIFY (`anthropic`)
+| Step | Command | Expected | Observed |
+|---|---|---|---|
+| CHECK | `python3 -c "import anthropic"` | not installed | `ModuleNotFoundError` |
+| CHECK | `python3 -m pip index versions anthropic` | latest version | 2.8.0 |
+| TAKE ACTION (approved by the student) | `/Library/Frameworks/Python.framework/Versions/3.14/bin/python3 -m pip install anthropic==2.8.0` | installs into system Python 3.14 site-packages | installed; `backend/requirements.txt` gained `anthropic==2.8.0` |
+| VERIFY | `python3 -c "import anthropic; print(anthropic.__version__)"` | `2.8.0` | `anthropic 2.8.0` |
+
+### Unit tests (**test data**, **mocked/controlled providers**, disposable DB)
+`python3 -m unittest discover -s backend/tests -t .` → **70 tests, OK** (15 in `test_decisions.py`; rerun after making
+Claude the default, with an added check that an unset `DECISIONS_PROVIDER` selects Claude):
+- Fixed snapshot: TESTSMA fixture as of 15:05:10Z freezes the 15:04 candle (close 19), SMA2 16 / SMA3 13, crossover up,
+  cash 1000, position 0; as of 15:04:40Z it uses the 15:03 candle (replay uses only data received by then).
+- A clearly labelled `kind = test` snapshot can be decided but is never eligible for an order.
+- Valid hold (open position) and wait (flat) are decisions; hold/sell while flat are `invalid`.
+- An incomplete snapshot (SMA warm-up) → `missing_input`, no provider call.
+- Malformed answers (value outside the five, no `action` answer, wrong shape, unparsable Claude text) → `malformed_answer`.
+- **Controlled provider failures with the real HTTP clients** (OpenAI urllib client and the `anthropic` SDK client):
+  a local socket that accepts but never answers → `timeout`; nothing listening → `provider_error` "connection error";
+  no key → `provider_error` naming the missing variable, with no request sent.
+- Claude request translation: schema enum is exactly the five actions, `additionalProperties: false`, the snapshot JSON
+  is in the user message, `fallbacks: "default"`.
+- The paper tables are identical before and after a decision.
+
+### Live provider request (**live model call** on **test market data**)
+Backend: `MARKET_DB=$SCRATCHPAD/decisions-live.sqlite LIVE_FEED=off python3 -m uvicorn backend.app:app --port 8010`,
+the DB created with `write_sma_fixture` (labelled TESTSMA test observations). `.env`: `DECISIONS_PROVIDER=claude`,
+`ANTHROPIC_API_KEY` set (only its length, 106, was checked).
+
+1. `POST /api/decisions/snapshots {"symbol":"TESTSMA","short":2,"long":3,"as_of":"2026-11-09T15:05:10Z"}` →
+   snapshot 1, `application`, complete, market data "TEST data (labelled fixture, SQLite)", candle 15:04 close 19,
+   SMA2 16 > SMA3 13, crossover up, paper cash 1000, position 0, order size 1.
+2. `POST /api/decisions {"snapshot_id":1}` → one call to `claude-opus-5-5`:
+
+| Field | API response | SQLite `decisions` row 1 | Match |
+|---|---|---|---|
+| provider / model / call kind | anthropic / claude-opus-5-5 / live | anthropic / claude-opus-5-5 / live | yes |
+| status | decided | decided | yes |
+| model proposal | buy | buy | yes |
+| validation | valid ("cash covers 1 share(s) at the candle close ($19.00)": cash $1,000.00) | valid | yes |
+| eligible for order | true | 1 | yes |
+| explanation | identical text (backend facts, then "Model proposal (claude-opus-5-5): buy. Rule check passes.") | identical | yes |
+| latency | 4519 ms | 4519 | yes |
+
+- Stored raw response: served model `claude-opus-5-5` (no fallback block), `stop_reason` `end_turn`, text `{"action":"buy"}`,
+  861 input / 11 output tokens, request id recorded.
+- Paper account untouched: `paper_orders` 0, `paper_fills` 0.
+- The key string does not appear in the SQLite file, the uvicorn log or the saved API response (`grep -c` = 0 each).
+  The log has no errors. The backend was stopped afterwards (port 8010 free).
+
+**Not exercised:** a live OpenAI request (no OpenAI key); a live timeout or refusal (covered only by controlled tests);
+decisions on live Yahoo data; any UI (chart capture comes in Prompt 10A).

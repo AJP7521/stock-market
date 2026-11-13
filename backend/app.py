@@ -13,11 +13,15 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from backend.settings import load_env
+
+load_env()   # OPENAI_API_KEY and other settings from the ignored .env, before anything reads them
+
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect  # noqa: E402
 from pydantic import BaseModel, Field
 
-from backend.candles import iso_ms, minute_candles
-from backend.history import load_candles
+from backend.candles import iso_ms
+from backend.decisions import create_snapshot, decide, get_decision, load_snapshot, make_provider
 from backend.indicator_store import add_config, delete_config, list_configs
 from backend.indicators import INDICATOR_TYPES, compute, describe_types, sma_crossover, validate_windows
 from backend.live import LiveHub
@@ -25,17 +29,18 @@ from backend.paper import PaperError, account_state, execute, fill_paper_orders,
 from backend.pnl import history as pnl_history
 from backend.recorder import connect, db_path, now_ms, record
 from backend.replay import connect_readonly, replay, sessions
+from backend.series import SAMPLE_SYMBOL, candle_series
 from backend.timeframes import MINUTE_MS, aggregate, to_ms
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-SAMPLE_SYMBOL = "SAMPLE"
 # LIVE_FEED=off starts the backend without any Yahoo connection (replay and review only).
 LIVE_FEED = os.environ.get("LIVE_FEED", "on").lower() != "off"
 # TEST_FEED=on enables POST /api/test/observations, which records labelled test prices (source='test').
 TEST_FEED = os.environ.get("TEST_FEED", "off").lower() == "on"
 PAPER_ACCOUNT = os.environ.get("PAPER_ACCOUNT", "paper")
 PAPER_STARTING_CASH = float(os.environ.get("PAPER_STARTING_CASH", "1000"))
+PAPER_ORDER_SIZE = int(os.environ.get("PAPER_ORDER_SIZE", "1"))
 Timeframe = Literal["1m", "5m", "15m", "1h", "1d"]
 hub = LiveHub()
 
@@ -66,26 +71,6 @@ def _parse_as_of(as_of: str | None) -> int | None:
     if dt.tzinfo is None:
         raise HTTPException(422, "as_of must include a time zone, e.g. a trailing Z")
     return round(dt.timestamp() * 1000)
-
-
-def candle_series(symbol: str, timeframe: str, as_of_ms: int | None) -> dict:
-    """One-minute data for the symbol, aggregated to the timeframe (shared by HTTP and WebSocket)."""
-    if symbol == SAMPLE_SYMBOL:
-        minutes, source = load_candles(), "synthetic CSV (prompts/data/sample-candles.csv)"
-    else:
-        if as_of_ms is None:          # live symbols: "now", so the latest candle can show as still forming
-            as_of_ms = now_ms()
-        with connect(db_path()) as conn:
-            live = minute_candles(conn, symbol, as_of_ms)
-            sources = {r[0] for r in conn.execute(
-                "SELECT DISTINCT source FROM observations WHERE ticker = ?", (symbol,))}
-        minutes = [{**item["candle"], "complete": item["status"]["complete"]} for item in live]
-        source = ("SQLite (no observations recorded yet)" if not sources
-                  else "TEST data (labelled fixture, SQLite)" if sources == {"test"}
-                  else "Yahoo Finance + TEST data (SQLite)" if "test" in sources
-                  else "Yahoo Finance (recorded in SQLite)")
-    result = aggregate(minutes, timeframe, as_of_ms)
-    return {"source": source, **result}
 
 
 @app.get("/api/history")
@@ -407,3 +392,75 @@ def test_observation(body: TestObservationIn) -> dict:
                 "received_at_ms": received, "orders_decided": fills}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------- decisions (Prompt 10)
+
+class SnapshotIn(BaseModel):
+    symbol: str = Field(min_length=1, max_length=20)
+    timeframe: Timeframe = "1m"
+    short: int = 5
+    long: int = 20
+    as_of: str | None = None          # replay: only observations received by this time
+
+
+@app.post("/api/decisions/snapshots", status_code=201)
+def create_decision_snapshot(body: SnapshotIn) -> dict:
+    """Freeze candle, SMAs, crossover and paper account for one symbol; no model call."""
+    _check_windows(body.short, body.long)
+    conn = _paper_conn()
+    try:
+        return create_snapshot(conn, body.symbol.upper(), body.timeframe, body.short, body.long, PAPER_ACCOUNT,
+                               PAPER_ORDER_SIZE, _parse_as_of(body.as_of))
+    finally:
+        conn.close()
+
+
+@app.get("/api/decisions/snapshots/{snapshot_id}")
+def read_decision_snapshot(snapshot_id: int) -> dict:
+    conn = _paper_conn()
+    try:
+        snap = load_snapshot(conn, snapshot_id)
+    finally:
+        conn.close()
+    if snap is None:
+        raise HTTPException(404, f"no snapshot {snapshot_id}")
+    return snap
+
+
+class DecisionIn(BaseModel):
+    snapshot_id: int | None = None    # use an existing snapshot (e.g. one a chart was rendered from)
+    symbol: str | None = None         # or create one now from these settings
+    timeframe: Timeframe = "1m"
+    short: int = 5
+    long: int = 20
+    as_of: str | None = None
+
+
+@app.post("/api/decisions")
+def create_decision(body: DecisionIn) -> dict:
+    """Ask the model what action fits one frozen snapshot; validate and store it. The paper account is untouched."""
+    conn = _paper_conn()
+    try:
+        snapshot_id = body.snapshot_id
+        if snapshot_id is None:
+            if not body.symbol:
+                raise HTTPException(422, "give a snapshot_id or a symbol")
+            _check_windows(body.short, body.long)
+            snapshot_id = create_snapshot(conn, body.symbol.upper(), body.timeframe, body.short, body.long,
+                                          PAPER_ACCOUNT, PAPER_ORDER_SIZE, _parse_as_of(body.as_of))["snapshot_id"]
+        return decide(conn, snapshot_id, make_provider())
+    finally:
+        conn.close()
+
+
+@app.get("/api/decisions/{decision_id}")
+def read_decision(decision_id: int) -> dict:
+    conn = _paper_conn()
+    try:
+        d = get_decision(conn, decision_id)
+    finally:
+        conn.close()
+    if d is None:
+        raise HTTPException(404, f"no decision {decision_id}")
+    return d

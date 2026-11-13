@@ -1,21 +1,24 @@
-# Current state: 2026-11-10
+# Current state: 2026-11-12
 
-**Last prompt:** 09D · Record profit and loss (complete, not committed). Prompts 1–9C are committed (latest `1556216`).
+**Last prompt:** 10 · Decision API (complete, not committed). Prompts 1–9D are committed (latest `0b1a51d`).
 
-## Files created or changed (Prompt 9D)
-- New: `backend/pnl.py`, `backend/tests/test_pnl.py` (6 tests)
-- Updated: `backend/paper.py` (valuations before fills; P&L row in the fill transaction), `backend/app.py`
-  (`/api/paper/pnl`), `frontend/src/PaperPanel.vue` (P&L history table), `README.md`, `docs/design-pipeline.md`,
-  `docs/verification.md`
+## Files created or changed (Prompt 10)
+- New: `backend/decisions.py`, `backend/series.py` (`candle_series` moved out of `app.py`), `backend/settings.py`
+  (`.env` loader), `backend/tests/test_decisions.py` (15 tests), `.env.example`
+- Updated: `backend/app.py` (`/api/decisions`, `/api/decisions/snapshots`, `.env` loading), `backend/requirements.txt`
+  (`anthropic==2.8.0`), `README.md`, `docs/design-pipeline.md`, `docs/verification.md`
+- Local only (ignored): `.env` with `DECISIONS_PROVIDER=claude` and `ANTHROPIC_API_KEY`
+- Installed: `anthropic` 2.8.0 into system Python 3.14 (approved by the student)
 
 ## Checks performed
-55/55 unit tests pass. Browser on the real clock with test prices: the five rows (600/4/0/0/0, 600/4/0/40/40,
-710/3/10/30/40, 710/3/10/−15/−5, 1025/0/25/0/25) match the expected table on screen and in SQLite, before and after a
-backend restart (diff empty). Services were stopped.
+70/70 unit tests pass (fixed snapshot, malformed answers, controlled timeout and connection failure for both clients).
+One live Claude request (`claude-opus-5-5`) on the labelled TESTSMA test data: proposal buy, valid, matched the SQLite
+decision row field for field; paper account untouched; key absent from DB, log and response. Backend stopped.
 
 ## Outstanding questions
-- The student needs to review and approve the Prompt 9D commit.
-- The `unavailable` valuation is covered only by a unit test.
+- The student needs to review and approve the Prompt 10 commit.
+- The student uses Claude only. Claude is now the default provider; OpenAI remains optional (`DECISIONS_PROVIDER=openai`),
+  unit-tested only (no live call).
 
 ## Next task
-Prompt 10 · Decision API: frozen snapshot plus model proposal (needs an OpenAI package and API key: CHECK → TAKE ACTION).
+Prompt 10A · Ask about chart (render a chart from a snapshot ID, capture it, submit it for analysis).

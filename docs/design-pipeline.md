@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 9D)
+## What exists today (after Prompt 10)
 
 ```
 browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
@@ -86,7 +86,11 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | Paper panel (cash, shares, orders, buy/sell/close/hold/wait, retry) | `frontend/src/PaperPanel.vue` | exists |
 | Test price feed (`TEST_FEED=on`, `POST /api/test/observations`) | `backend/app.py` | exists |
 | P&L history (weighted average cost; rows on fills and completed-candle valuations; one row per event) | `backend/pnl.py`, `/api/paper/pnl`, `PaperPanel.vue` | exists |
-| Decisions, review, automation | – | planned (Prompts 10–12) |
+| `candle_series` shared by HTTP, WebSocket and decision snapshots | `backend/series.py` | exists |
+| `.env` loader (does not override the environment; never logs values) | `backend/settings.py`, `.env.example` | exists |
+| Decision snapshots (frozen candle, SMAs, crossover, account; as-of aware; incomplete = ineligible) and decisions (provider call, rule check, explanation, one decision ID) | `backend/decisions.py`, `/api/decisions*` | exists |
+| Decision providers: Claude Messages API (`anthropic` SDK, structured-output choice) (default) and OpenAI `POST /v1/decisions` (`DECISIONS_PROVIDER=openai`) | `backend/decisions.py` | exists |
+| Chart capture ("Ask about chart"), review, automation | – | planned (Prompts 10A–12) |
 | Voice | – | planned (Prompt 13) |
 | SmokeTest command | – | planned (Prompt 14) |
 
@@ -201,4 +205,26 @@ observation arrives -> paper.process_observation
     2. pending orders fill -> in the same transaction: pnl.record_fill(fill)
          paper_cost_basis (basis, cumulative realized) + pnl_history row "fill:<id>" at the fill price
 GET /api/paper/pnl?symbol= -> PaperPanel "Profit and loss history" table
+```
+
+## Decision path (Prompt 10)
+
+```
+POST /api/decisions/snapshots {symbol, timeframe, short, long, as_of?}
+    -> decisions.create_snapshot: series.candle_series (as of the decision time) -> last COMPLETED candle,
+       indicators.sma_crossover at that candle, paper ledger cash/position from fills executed by then
+    -> decision_snapshots row (kind application | test, complete 0/1, snapshot_json); no model call
+
+POST /api/decisions {snapshot_id} (or settings to create one)
+    -> decide(): incomplete/unknown snapshot -> status missing_input, no provider call
+    -> build_request (provider-neutral: STRATEGY text, snapshot JSON, named choice question "action")
+    -> make_provider(): default (unset or claude) -> ClaudeDecisions: client.beta.messages.create,
+                          output_config.format json_schema {"action": enum[buy,sell,hold,wait,close]},
+                          fallbacks "default" on a refusal
+                        DECISIONS_PROVIDER=openai -> OpenAIDecisions: POST /v1/decisions (urllib)
+    -> status decided | malformed_answer | timeout | provider_error
+    -> check_rules (cash, shares, flat/open) -> validation valid | invalid | not_checked
+    -> explain() from snapshot facts; decisions row (proposal, backend facts, request/response, latency)
+    -> eligible_for_order only for a valid decision on a complete application snapshot
+The paper tables are never written on this path.
 ```

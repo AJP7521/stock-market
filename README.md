@@ -30,7 +30,7 @@ No real money or brokerage account is involved at any stage.
 | Frontend | Vue 3.5.45, built with Vite 8.3.7 and @vitejs/plugin-vue 6.0.10 | installed (`frontend/package.json`, lockfile) |
 | Charting | TradingView Lightweight Charts 5.2.1 | installed (`frontend/package.json`, lockfile) |
 | Market data | yfinance 1.8.0 `AsyncWebSocket` (websockets 17.4, protobuf 7.36.2) | installed (`backend/requirements.txt`) |
-| AI provider | OpenAI API (key kept in the backend environment) | **not installed** – Prompt 10 |
+| AI provider | Claude API via `anthropic` 2.8.0 (model `claude-opus-5-5`), the default; optionally OpenAI `POST /v1/decisions` (standard library) with `DECISIONS_PROVIDER=openai`; key in the ignored `.env` | installed (`backend/requirements.txt`) |
 
 ## Prerequisites found on this computer (2026-11-10)
 
@@ -167,6 +167,27 @@ MARKET_DB=/tmp/paper-demo.sqlite LIVE_FEED=off TEST_FEED=on python3 -m uvicorn b
 curl -X POST http://127.0.0.1:8000/api/test/observations -H 'Content-Type: application/json' -d '{"symbol":"TESTPAPER","price":100}'
 ```
 
+### Decisions (model proposal about one completed candle)
+
+`POST /api/decisions` asks a model which action (buy, sell, hold, wait, close) fits one frozen snapshot of the last
+completed candle, its two SMAs and crossover, and the paper account. The answer is checked against the long-only rules
+and saved in SQLite with a factual explanation. **It never places an order**: the paper account is untouched.
+
+Put `ANTHROPIC_API_KEY` in `.env` (copy `.env.example`); Claude is the default provider. To use OpenAI instead, set
+`DECISIONS_PROVIDER=openai` and `OPENAI_API_KEY`. Freeze a snapshot first (no model call), then ask about it:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/decisions/snapshots -H 'Content-Type: application/json' -d '{"symbol":"TESTSMA","short":2,"long":3,"as_of":"2026-11-09T15:05:10Z"}'
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/decisions -H 'Content-Type: application/json' -d '{"snapshot_id":1}'
+```
+
+`GET /api/decisions/{id}` and `GET /api/decisions/snapshots/{id}` read them back. Statuses: `decided`,
+`malformed_answer`, `timeout`, `provider_error`, `missing_input`. A live model can be asked about **test** market data;
+the response labels the market data source and the provider call separately.
+
 ### Configurable indicators
 
 The **Indicators** panel lists the indicator types Python provides (simple moving average, rolling price range). Give an
@@ -287,4 +308,5 @@ kill $(lsof -tiTCP:8000 -sTCP:LISTEN) $(lsof -tiTCP:5173 -sTCP:LISTEN)
 
 Do not put API keys in source code, prompts, logs or Git. Keep them in the
 backend's environment, for example in a local `.env` file. `.gitignore` already
-excludes that file.
+excludes that file. `backend/settings.py` loads `.env` at startup without overriding variables that are already set,
+and never logs the values. `.env.example` lists the variable names with empty values.
