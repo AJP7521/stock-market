@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS automation_state (
     short        INTEGER NOT NULL,
     long         INTEGER NOT NULL,
     account_id   TEXT NOT NULL,
+    order_size   INTEGER NOT NULL DEFAULT 1,     -- shares for buy and sell (close sells the whole position)
     enabled      INTEGER NOT NULL,
     generation   INTEGER NOT NULL,
     started_ms   INTEGER,
@@ -89,6 +90,9 @@ class AutomationError(ValueError):
 def ensure_schema(conn: sqlite3.Connection) -> None:
     paper.ensure_schema(conn)
     conn.executescript(SCHEMA)
+    if "order_size" not in {r[1] for r in conn.execute("PRAGMA table_info(automation_state)")}:
+        conn.execute("ALTER TABLE automation_state ADD COLUMN order_size INTEGER NOT NULL DEFAULT 1")
+        conn.commit()
 
 
 def strategy_name(short: int, long: int) -> str:
@@ -115,7 +119,10 @@ def state(conn, symbol: str, interval: str, short: int, long: int) -> dict | Non
 
 
 def start(conn, symbol: str, interval: str, short: int, long: int, *, paper_account: str, test_account: str,
-          test_starting_cash: float, at_ms: int | None = None) -> dict:
+          test_starting_cash: float, order_size: int = 1, at_ms: int | None = None) -> dict:
+    """Enable automation (a new generation). `order_size` is used for buy and sell orders until the next Start."""
+    if isinstance(order_size, bool) or not isinstance(order_size, int) or order_size < 1:
+        raise AutomationError("order size must be a positive whole number of shares")
     ensure_schema(conn)
     at_ms = at_ms if at_ms is not None else now_ms()
     account = account_for(conn, symbol, paper_account, test_account)
@@ -124,11 +131,11 @@ def start(conn, symbol: str, interval: str, short: int, long: int, *, paper_acco
     strategy = strategy_name(short, long)
     with conn:
         conn.execute(
-            """INSERT INTO automation_state (key, strategy, symbol, interval, short, long, account_id, enabled,
-                   generation, started_ms, stopped_ms) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, NULL)
+            """INSERT INTO automation_state (key, strategy, symbol, interval, short, long, account_id, order_size,
+                   enabled, generation, started_ms, stopped_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, NULL)
                ON CONFLICT (key) DO UPDATE SET enabled = 1, generation = generation + 1, account_id = excluded.account_id,
-                   started_ms = excluded.started_ms, stopped_ms = NULL""",
-            (_key(strategy, symbol, interval), strategy, symbol, interval, short, long, account, at_ms))
+                   order_size = excluded.order_size, started_ms = excluded.started_ms, stopped_ms = NULL""",
+            (_key(strategy, symbol, interval), strategy, symbol, interval, short, long, account, order_size, at_ms))
     return state(conn, symbol, interval, short, long)
 
 
@@ -176,8 +183,8 @@ def _candle_end(item: dict, interval: str) -> int:
     return to_ms(item["status"]["interval_end"])
 
 
-def claim_run(conn, symbol: str, interval: str, short: int, long: int, candle_time: str, *, order_size: int,
-              chart_candles: int = 60, at_ms: int | None = None) -> dict:
+def claim_run(conn, symbol: str, interval: str, short: int, long: int, candle_time: str, *,
+              order_size: int | None = None, chart_candles: int = 60, at_ms: int | None = None) -> dict:
     """Create the run for one newly completed candle (or return the existing one) and freeze its snapshot."""
     ensure_schema(conn)
     at_ms = at_ms if at_ms is not None else now_ms()
@@ -221,7 +228,8 @@ def claim_run(conn, symbol: str, interval: str, short: int, long: int, candle_ti
                 "interval = ? AND candle_ts = ?", (st["account_id"], st["strategy"], symbol, interval,
                                                     candle_time)).fetchone()[0]
             return {"created": False, "run": get_run(conn, run_id), "snapshot": None}
-    snap = create_snapshot(conn, symbol, interval, short, long, st["account_id"], order_size, at_ms,
+    snap = create_snapshot(conn, symbol, interval, short, long, st["account_id"],
+                           order_size if order_size is not None else st["order_size"], at_ms,
                            candle_time=candle_time, chart_candles=chart_candles)
     with conn:
         conn.execute("UPDATE automation_runs SET snapshot_id = ? WHERE id = ?", (snap["snapshot_id"], run_id))

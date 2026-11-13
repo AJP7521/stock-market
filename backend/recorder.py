@@ -142,7 +142,14 @@ def record(conn: sqlite3.Connection, message: dict, received_at_ms: int,
     return {"observation_id": obs_id, "seq": seq, "is_repeat": bool(is_repeat)}
 
 
+# Test clock (SmokeTest, Prompt 14): when set, every server-side "now" is this fixed time. Only the TEST_FEED-gated
+# /api/test/clock route sets it; it is None in normal use.
+TEST_NOW_MS: int | None = None
+
+
 def now_ms() -> int:
+    if TEST_NOW_MS is not None:
+        return TEST_NOW_MS
     return round(datetime.now(timezone.utc).timestamp() * 1000)
 
 

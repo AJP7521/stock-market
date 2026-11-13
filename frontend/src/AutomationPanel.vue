@@ -21,6 +21,7 @@ const snapshot = ref(null)        // snapshot being rendered for capture
 const renderKey = ref(0)
 const previewRef = ref(null)
 const trace = ref(null)
+const orderSize = ref(1)          // shares for buy and sell while running (close sells the whole position)
 const attempted = new Set()       // candles this page already tried (the backend also deduplicates)
 let timer = null
 let working = false
@@ -46,7 +47,8 @@ async function refresh() {
 async function start() {
   message.value = ''
   attempted.clear()
-  try { view.value = await post('/api/automation/start', params.value) } catch (e) { message.value = e.message }
+  try { view.value = await post('/api/automation/start', { ...params.value, order_size: orderSize.value }) }
+  catch (e) { message.value = e.message }
 }
 
 async function stop() {
@@ -134,11 +136,16 @@ watch(params, () => { attempted.clear(); trace.value = null; refresh() })
   <section class="auto" data-testid="automation">
     <h2>Paper automation (analyst + reviewer → paper account)</h2>
     <div class="controls">
+      <label>Order size
+        <input v-model.number="orderSize" type="number" min="1" step="1" :disabled="running" style="width:4em"
+               data-testid="auto-order-size" /></label>
       <button type="button" :disabled="running" data-testid="auto-start" @click="start">Start</button>
       <button type="button" :disabled="!running" data-testid="auto-stop" @click="stop">Stop</button>
       <strong data-testid="auto-state" :class="running ? 'ok' : 'muted'">{{ running ? 'Running' : 'Stopped' }}</strong>
       <span class="hint">{{ symbol }} · {{ timeframe }} · strategy sma{{ smaShort }}x{{ smaLong }}
-        <template v-if="view?.state"> · generation {{ view.state.generation }} · started {{ view.state.started_at ?? '—' }}</template>
+        <template v-if="view?.state"> · generation {{ view.state.generation }} · order size
+          <span data-testid="auto-state-order-size">{{ view.state.order_size }}</span>
+          · started {{ view.state.started_at ?? '—' }}</template>
         · decisions older than {{ view?.max_decision_age_s ?? '—' }} s are not filled</span>
       <span v-if="busy" class="hint" data-testid="auto-busy">{{ busy }}</span>
     </div>
@@ -211,7 +218,10 @@ watch(params, () => { attempted.clear(); trace.value = null; refresh() })
           </template>
           <template v-else>no order · {{ trace.run?.status }}<template v-if="trace.run?.reason"> ({{ trace.run.reason }})</template></template></li>
         <li v-if="trace.pnl_row" data-testid="trace-pnl"><strong>P&amp;L row</strong>: {{ trace.pnl_row.description }}
-          · realized {{ money(trace.pnl_row.realized_micros / 1e6) }}</li>
+          · realized <span data-testid="trace-pnl-realized">{{ money(trace.pnl_row.realized_micros / 1e6) }}</span>
+          · unrealized <span data-testid="trace-pnl-unrealized">{{ trace.pnl_row.unrealized_micros === null ? 'unavailable'
+            : money(trace.pnl_row.unrealized_micros / 1e6) }}</span>
+          · total {{ trace.pnl_row.total_micros === null ? 'unavailable' : money(trace.pnl_row.total_micros / 1e6) }}</li>
         <li data-testid="trace-account"><strong>Account now</strong> ({{ trace.account_now?.account }}):
           {{ money(trace.account_now?.cash) }}, {{ trace.account_now?.positions?.[symbol] ?? 0 }} {{ symbol }} shares,
           {{ trace.account_now?.fill_count }} fills</li>

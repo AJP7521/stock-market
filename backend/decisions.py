@@ -463,12 +463,17 @@ def claude_answers(message, params: dict) -> list:
             for name in params["output_config"]["format"]["schema"]["required"] if name in reply]
 
 
+TEST_ANSWERS: str | None = None      # runtime test-double answers (SmokeTest); None = use the environment
+
+
 class TestDoubleDecisions:
     """PROVIDER TEST DOUBLE (DECISIONS_PROVIDER=test): no network call; answers are fixed and labelled 'mock'.
 
     It decodes any input_image it receives and reports the PNG's sha256 and size in its response, so a check can
     prove the provider received a decodable PNG identical to the stored capture. Answers come from
-    DECISIONS_TEST_ANSWERS, e.g. "action=buy,crossover=up,evidence=sufficient" (default).
+    DECISIONS_TEST_ANSWERS, e.g. "action=buy,crossover=up,evidence=sufficient" (default), or from TEST_ANSWERS when
+    the TEST_FEED-gated /api/test/provider route has set it. "fail=provider_error" or "fail=timeout" makes the call
+    fail that way. Each response also reports the symbol and candle time it received (the model boundary).
     """
 
     name = "test-double"
@@ -476,13 +481,19 @@ class TestDoubleDecisions:
     model = "test-double"
 
     def __init__(self, answers: str | None = None):
-        spec = answers if answers is not None else os.environ.get(
+        spec = answers if answers is not None else TEST_ANSWERS if TEST_ANSWERS is not None else os.environ.get(
             "DECISIONS_TEST_ANSWERS", "action=buy,crossover=up,evidence=sufficient")
         self.answers = dict(item.split("=", 1) for item in spec.split(",") if "=" in item)
         self.received = []
 
     def send(self, body: dict) -> dict:
         self.received.append(body)
+        if self.answers.get("fail") == "timeout":
+            raise ProviderTimeout("test double: simulated timeout")
+        if self.answers.get("fail") == "provider_error":
+            raise ProviderError("test double: simulated provider failure (HTTP 503)")
+        data = next((p["data"] for p in body["input"][1]["content"] if p["type"] == "input_json"), {})
+        snap = data.get("snapshot", data)                    # reviewer requests nest the snapshot
         images = []
         for part in body["input"][1]["content"]:
             if part["type"] == "input_image":
@@ -493,6 +504,8 @@ class TestDoubleDecisions:
                     images.append({"decodable": False, "problem": exc.problem})
         asked = [q["name"] for q in body["questions"]]
         return {"model": self.model, "test_double": True, "received_images": images,
+                "received_snapshot": {"snapshot_id": snap.get("snapshot_id"), "symbol": snap.get("symbol"),
+                                      "candle_time": (snap.get("candle") or {}).get("timestamp")},
                 "answers": [{"type": "choice", "name": n, "choice": self.answers[n], "probabilities": None,
                              "confidence": None} for n in asked if n in self.answers]}
 

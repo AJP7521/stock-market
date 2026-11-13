@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 13)
+## What exists today (after Prompt 14)
 
 ```
 browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
@@ -100,9 +100,10 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | Orders and fills linked to a decision (`decision_id`, one order per decision), FILL_CHECKS / ORDER_DECIDED hooks inside the fill transaction | `backend/paper.py` | exists |
 | Automation panel: Start/Stop, polling for completed candles, off-screen render + capture, runs table, decision trace | `frontend/src/AutomationPanel.vue`, `App.vue` | exists |
 | Voice about one decision: read-only record from SQLite, Claude replies with session history, sessions/turns stored; `GET /api/decisions`, `/api/voice/sessions*` | `backend/voice.py`, `backend/app.py` | exists |
+| SmokeTest: one command, temporary DB, FastAPI + Vite + headless Chrome (Playwright), three checks, report, cleanup; GitHub Actions on push | `backend/smoke.py`, `.github/workflows/smoke.yml`, `backend/requirements-dev.txt` | exists |
+| Test controls (TEST_FEED=on only): fixed server clock, runtime test-double answers / failures; automation order size per Start | `backend/recorder.py` (`TEST_NOW_MS`), `backend/decisions.py` (`TEST_ANSWERS`), `backend/app.py` (`/api/test/clock`, `/api/test/provider`), `backend/automation.py` | exists |
 | Voice panel: decision picker, microphone (getUserMedia) indicator, Web Speech recognition + synthesis, End releases the microphone | `frontend/src/VoicePanel.vue` | exists |
 | Voice | – | planned (Prompt 13) |
-| SmokeTest command | – | planned (Prompt 14) |
 
 ## File responsibilities
 
@@ -319,4 +320,24 @@ VoicePanel: choose decision -> Start voice
   End voice / error: recognition.abort, speechSynthesis.cancel, every track.stop() (microphone released),
         POST /api/voice/sessions/{id}/end
 Deviation from the prompt: no WebRTC audio stream to a model (the Claude API has no audio).
+```
+
+## SmokeTest path (Prompt 14)
+
+```
+python3 -m backend.smoke
+  temp dir: smoke.sqlite <- write_sma_fixture (TESTSMA, source test)
+  FastAPI :8000 (MARKET_DB=temp, LIVE_FEED=off, TEST_FEED=on, DECISIONS_PROVIDER=test, keys empty) + Vite :5173
+  wait for GET :5173/api/health (database = temp)
+  Playwright -> Chrome (headless)
+    1 Replay TESTSMA -> add SMA3 -> values table @15:04 vs hand calc -> remove, add SMA2 -> @15:04, @15:06
+    2 Live TESTSMA, SMA 2/3, cutoff 15:04 -> Ask about chart (POST /api/test/provider answers)
+        screen answers / verdict / eligibility; SQLite response_json.received_images + received_snapshot
+        (analyst and reviewer); stored PNG decoded in the browser; fills unchanged; then fail=provider_error
+    3 TESTAUTO on the test clock (POST /api/test/clock + /api/test/observations), automation Start (size 4)
+        m4 up: buy 4 -> fill 100; duplicate apply/claim; Stop, Start (size 1); m5 down: sell 1 -> fill 110;
+        m6 up: veto; m7: hold (no order); m8 down: close 3 -> fill 105; screen + SQLite: $1,025, 0, $25, $0;
+        Stop -> new candles -> no run, no order
+  report.md / report.json (+ failure.png, logs, DB on failure); close browser, kill process groups, remove temp DB
+  exit 0 (all pass) or 1
 ```

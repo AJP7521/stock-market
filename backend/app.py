@@ -395,6 +395,37 @@ def test_observation(body: TestObservationIn) -> dict:
         conn.close()
 
 
+class TestClockIn(BaseModel):
+    time: str | None = None           # ISO UTC time to freeze the server clock at; null returns to the real clock
+
+
+@app.post("/api/test/clock")
+def test_clock(body: TestClockIn) -> dict:
+    """TEST FEED ONLY: freeze every server-side "now" (SmokeTest), or release it."""
+    if not TEST_FEED:
+        raise HTTPException(403, "the test controls are off; start the backend with TEST_FEED=on")
+    import backend.recorder as recorder_module
+    recorder_module.TEST_NOW_MS = _parse_as_of(body.time) if body.time else None
+    return {"test_clock": iso_ms(recorder_module.TEST_NOW_MS) if recorder_module.TEST_NOW_MS else None,
+            "now": iso_ms(now_ms())}
+
+
+class TestProviderIn(BaseModel):
+    answers: str | None = None        # e.g. "action=buy,crossover=up,evidence=sufficient,verdict=accept"; null = env
+
+
+@app.post("/api/test/provider")
+def test_provider(body: TestProviderIn) -> dict:
+    """TEST FEED ONLY, with DECISIONS_PROVIDER=test: set the test double's answers for the next calls."""
+    if not TEST_FEED:
+        raise HTTPException(403, "the test controls are off; start the backend with TEST_FEED=on")
+    if os.environ.get("DECISIONS_PROVIDER", "claude").strip().lower() != "test":
+        raise HTTPException(409, "the provider test double is not active (DECISIONS_PROVIDER=test)")
+    import backend.decisions as decisions_module
+    decisions_module.TEST_ANSWERS = body.answers
+    return {"answers": decisions_module.TEST_ANSWERS}
+
+
 # ---------------------------------------------------------------- decisions (Prompt 10)
 
 class SnapshotIn(BaseModel):
@@ -509,6 +540,7 @@ class AutomationIn(BaseModel):
     timeframe: Timeframe = "1m"
     short: int = 5
     long: int = 20
+    order_size: int | None = Field(None, ge=1, le=1_000_000)   # Start only; default PAPER_ORDER_SIZE
 
 
 def _automation_view(conn, body_symbol: str, timeframe: str, short: int, long: int) -> dict:
@@ -529,7 +561,8 @@ def automation_start(body: AutomationIn) -> dict:
     try:
         sym = body.symbol.upper()
         automation.start(conn, sym, body.timeframe, body.short, body.long, paper_account=PAPER_ACCOUNT,
-                         test_account=PAPER_TEST_ACCOUNT, test_starting_cash=PAPER_TEST_STARTING_CASH)
+                         test_account=PAPER_TEST_ACCOUNT, test_starting_cash=PAPER_TEST_STARTING_CASH,
+                         order_size=body.order_size or PAPER_ORDER_SIZE)
         return _automation_view(conn, sym, body.timeframe, body.short, body.long)
     finally:
         conn.close()
@@ -567,7 +600,7 @@ def automation_claim(body: RunIn) -> dict:
     conn = _paper_conn()
     try:
         return automation.claim_run(conn, body.symbol.upper(), body.timeframe, body.short, body.long,
-                                    body.candle_time, order_size=PAPER_ORDER_SIZE, chart_candles=body.chart_candles)
+                                    body.candle_time, chart_candles=body.chart_candles)
     except automation.AutomationError as exc:
         raise HTTPException(409, str(exc)) from None
     finally:

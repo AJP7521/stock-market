@@ -829,3 +829,81 @@ appear in the DB or logs. Services stopped.
 **Not confirmed / not exercised:** the student's report of Chrome's microphone indicator after End (release was
 verified with the mocked track state); a real permission denial in Chrome (mocked only); the speech-recognition
 `network` error path.
+
+---
+
+## Prompt 14 · Workstation SmokeTest from one command (2026-11-13)
+
+### CHECK → TAKE ACTION → VERIFY (browser tooling)
+| Step | Command / observation | Result |
+|---|---|---|
+| CHECK | No Playwright/Puppeteer in Python or `frontend/node_modules`; no test scripts in `package.json`; Google Chrome 157.0.8103.51 installed; no Git remote | browser tool missing |
+| TAKE ACTION (approved by the student) | `/Library/Frameworks/Python.framework/Versions/3.14/bin/python3 -m pip install playwright==1.65.1` → playwright 1.65.1, greenlet 3.5.6 in system Python 3.14 site-packages; new `backend/requirements-dev.txt`; no browser downloaded (uses installed Chrome) | installed |
+| VERIFY | Playwright launched Chrome headless (`channel="chrome"`): browser 157.0.8103.51, test page text "ok" | pass |
+
+### Command
+```bash
+python3 -m backend.smoke
+```
+Isolated data: a new temporary SQLite DB per run with the labelled TESTSMA fixture; TESTAUTO prices from the test
+feed on a fixed **test clock** (`POST /api/test/clock`, TEST_FEED only). **Stubbed:** Yahoo (`LIVE_FEED=off`) and the
+models (`DECISIONS_PROVIDER=test`, answers and failures set through `POST /api/test/provider`, TEST_FEED only; API keys
+emptied). **Real:** Vue UI in headless Chrome, FastAPI routes, chart capture, analyst + reviewer coordination,
+simulator, P&L and SQLite.
+
+### Runs
+| Run | Result | Notes |
+|---|---|---|
+| 1 (`smoke-20261112-230302`) | **FAIL**, exit 1, 18 s | "Skip to end" stayed disabled: at 200 steps/s the 8-step replay had already finished (test timing, not the app). Cleanup verified: ports 8000/5173 free, no headless Chrome left. |
+| AutoLoop cycle 1 | | The replay helper waits for the last step instead of clicking Skip to end. |
+| 2 (`smoke-20261112-230338`) | **FAIL**, exit 1, 46/47 | "failure shown as not eligible with the reason": the reason is shown in the on-screen explanation ("No usable proposal (provider_error): test double: simulated provider failure (HTTP 503)…"), while the eligibility line lists the failed gates. The check looked at the wrong element. Evidence: `failure.png`, DB, logs in the run folder. |
+| AutoLoop cycle 2 | | Check "Not eligible" on the eligibility line and the reason in `ask-explanation`. |
+| 3 (`smoke-20261112-230417`) | **PASS**, exit 0, 48/48 | |
+| 4 (`smoke-20261112-230450`) | **PASS**, exit 0, 48/48, 27 s | Second consecutive run: clean `paper-test` account again ($1,000.00, 0 shares, 0 fills); no processes, browser or temp DB left. |
+
+### Expected and observed (runs 3 and 4 identical)
+**1 · Recorded session + SMA (replay of TESTSMA, closes 13, 10, 7, 13, 19, 7, 1 from 15:00)**
+| Check | Expected (hand calculation) | Observed on screen |
+|---|---|---|
+| SMA3 at 15:04 | (7+13+19)/3 = 13 | 13 |
+| window changed to 2 (remove SMA3, add SMA2): SMA2 at 15:04 | (13+19)/2 = 16 | 16 |
+| SMA2 at 15:06 | (7+1)/2 = 4 | 4 |
+| stored config | SMA2, sma, window 2 | same in `indicator_configs` |
+
+**2 · Ask about chart (TESTSMA 1m, SMA 2/3, cutoff 15:04, MOCKED provider)**
+- Screen: status decided · "MOCK (provider test double)" · action buy, crossover up ("Python calculated up: match"),
+  evidence sufficient · reviewer accept · "Eligible for automated execution".
+- Model boundary (SQLite `response_json` / `review_json`): the analyst and the reviewer each received a decodable PNG
+  whose sha256 equals the stored capture (`099e86f8…`), with symbol TESTSMA and candle time 2026-11-09T15:04:00Z;
+  the stored PNG decodes in the browser with ≥ 5 distinct colours sampled. Fills 0 → 0.
+- Provider failure (`fail=provider_error`): status `provider_error` on screen, "Not eligible…", explanation names
+  "simulated provider failure"; fills still 0.
+
+**3 · Paper automation (TESTAUTO, test clock from 2026-11-16 15:00Z, start $1,000, zero fees, MOCKED proposals and reviews)**
+| Step | Expected | Observed |
+|---|---|---|
+| Start, order size 4 | clean `paper-test`: $1,000.00, 0, 0 fills | same |
+| m4 up crossover → buy 4, fill price $100 | 1 fill | 1 |
+| duplicate: same decision applied again, same candle claimed again | duplicate / not created; no fill | (True, False); 1 fill |
+| Stop, Start with order size 1; m5 down → sell 1, fill $110 | 2 fills | 2 |
+| m6 up: reviewer veto | skipped "not eligible: reviewer accepted"; no fill | same; 2 fills |
+| m7: approved hold | no order | no_order |
+| m8 down → close 3, fill $105 | 3 fills | 3 |
+| screen | $1,025.00, 0 shares, 3 fills; trace realized $25.00, unrealized $0.00 | same |
+| SQLite | cash 1,025,000,000 µ$, position 0; fills buy 4 @100, sell 1 @110, close 3 @105; last P&L row realized 25,000,000, unrealized 0; 3 fills linked to decisions; main `paper` $1,000, 0 fills | same |
+| Stop, then candles m9–m10 delivered | no run, no new order (3 orders) | none; 3 |
+
+All provider responses in the SmokeTest are **mocked**; all market data is **test** data.
+
+### Unit tests
+`python3 -m unittest discover -s backend/tests -t .` → 110 tests, OK (after the test-control and order-size changes).
+
+### GitHub Actions
+`.github/workflows/smoke.yml` (on push and manual dispatch): Python 3.14, Node 24, `pip install -r backend/requirements.txt
+-r backend/requirements-dev.txt`, `python -m playwright install --with-deps chromium`, `npm ci`, unit tests, then
+`python -m backend.smoke` with `SMOKE_BROWSER_CHANNEL=""` (Playwright's Chromium), uploading `test-results/`. No secrets.
+The YAML parses (1 job, 9 steps). **Not run yet:** the repository has no GitHub remote, and Playwright's own Chromium
+was not downloaded locally, so the CI browser path is untested.
+
+### Separate live observations (not part of the SmokeTest)
+Live Yahoo data: Prompts 5–8. Live Claude image decision and review: Prompts 10A and 11. Voice: Prompt 13.

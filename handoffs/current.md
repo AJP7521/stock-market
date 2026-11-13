@@ -1,27 +1,27 @@
 # Current state: 2026-11-13
 
-**Last prompt:** 13 · Voice about a recorded decision (complete, not committed). Prompts 1–12 are committed
-(latest `ab49e95`).
+**Last prompt:** 14 · Workstation SmokeTest (complete, not committed). Prompts 1–13 are committed (latest `8e646c6`).
+This was the last prompt in `prompts/`.
 
-## Files created or changed (Prompt 13)
-- New: `backend/voice.py` (read-only record, Claude/test-double replies, sessions and turns),
-  `backend/tests/test_voice.py` (8 tests), `frontend/src/VoicePanel.vue`
-- Updated: `backend/app.py` (`GET /api/decisions`, `/api/voice/sessions*`), `frontend/src/App.vue`, `README.md`,
-  `docs/design-pipeline.md`, `docs/verification.md`
-- No packages installed or manifests changed.
-
-## Decisions
-- Claude has no audio API; the student chose Claude + browser speech (Web Speech API) over adding an OpenAI key for
-  GPT-Live WebRTC. Deviation recorded: no WebRTC audio stream; Chrome sends speech audio to Google.
+## Files created or changed (Prompt 14)
+- New: `backend/smoke.py` (the SmokeTest), `backend/requirements-dev.txt` (playwright 1.65.1),
+  `.github/workflows/smoke.yml`
+- Updated: `backend/recorder.py` (test clock), `backend/decisions.py` (runtime test-double answers and failures,
+  received symbol/candle in test-double responses), `backend/app.py` (`/api/test/clock`, `/api/test/provider`,
+  automation `order_size`), `backend/automation.py` (order size per Start), `frontend/src/AutomationPanel.vue`
+  (order-size field; trace shows unrealized and total P&L), `README.md`, `docs/design-pipeline.md`,
+  `docs/verification.md`
+- Installed (approved): playwright 1.65.1 + greenlet 3.5.6 in system Python 3.14.
 
 ## Checks performed
-110/110 unit tests pass. Mocked browser checks (flow, denied microphone, failed connection) pass, microphone track
-released. Live session in the student's Chrome with Claude: answers for decision 3 (filled) and decision 5 (vetoed,
-no trade) match SQLite. Services stopped.
+`python3 -m backend.smoke`: runs 1–2 failed on test-side timing/element choices (AutoLoop cycles 1–2), runs 3 and 4
+passed 48/48 with a clean account each time; cleanup verified after passes and failures. 110/110 unit tests pass.
 
 ## Outstanding questions
-- The student needs to review and approve the Prompt 13 commit.
-- The student has not yet confirmed Chrome's microphone indicator disappeared after End voice.
+- The student needs to review and approve the Prompt 14 commit.
+- The GitHub Actions workflow has not run: there is no Git remote yet (push needs the student's approval).
+- Not confirmed: Chrome's microphone indicator after End voice (Prompt 13).
 
 ## Next task
-Prompt 14 · Automate the workstation SmokeTest (one command).
+None in `prompts/`. Possible next steps: push to GitHub to run CI; decide on the pre-existing "database is locked"
+start-up race in `recorder.connect`.

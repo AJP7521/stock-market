@@ -30,6 +30,7 @@ No real money or brokerage account is involved at any stage.
 | Frontend | Vue 3.5.45, built with Vite 8.3.7 and @vitejs/plugin-vue 6.0.10 | installed (`frontend/package.json`, lockfile) |
 | Charting | TradingView Lightweight Charts 5.2.1 | installed (`frontend/package.json`, lockfile) |
 | Market data | yfinance 1.8.0 `AsyncWebSocket` (websockets 17.4, protobuf 7.36.2) | installed (`backend/requirements.txt`) |
+| Browser tests | Playwright 1.65.1 (Python) driving Google Chrome; SmokeTest `python3 -m backend.smoke` | installed (`backend/requirements-dev.txt`) |
 | Speech | Browser Web Speech API (`SpeechRecognition`, `speechSynthesis`) in Google Chrome; no package | built in (Prompt 13) |
 | AI provider | Claude API via `anthropic` 2.8.0 (model `claude-opus-5-5`), the default; optionally OpenAI `POST /v1/decisions` (standard library) with `DECISIONS_PROVIDER=openai`; key in the ignored `.env` | installed (`backend/requirements.txt`) |
 
@@ -386,6 +387,37 @@ python3 -m backend.candles AAPL
 ```bash
 python3 -m unittest discover -s backend/tests -t . -v
 ```
+
+### SmokeTest (one command)
+
+Install the test-only dependency once (Playwright for Python; it drives your installed Google Chrome):
+
+```bash
+python3 -m pip install -r backend/requirements-dev.txt
+```
+
+Run it (ports 8000 and 5173 must be free):
+
+```bash
+python3 -m backend.smoke
+```
+
+It creates a fresh temporary database with the labelled TESTSMA fixture, starts FastAPI (`LIVE_FEED=off`,
+`DECISIONS_PROVIDER=test`, `TEST_FEED=on`, no API keys) and Vite, waits for both, and drives headless Chrome through:
+(1) replaying the recorded session, adding an SMA, changing its window and comparing with a hand calculation;
+(2) Ask about chart: a decodable PNG with the right symbol and candle at the model boundary, known answers on screen,
+no fill, then a provider failure on screen; (3) paper automation on a test clock: buy 4 @ $100, sell 1 @ $110, close
+3 @ $105 → $1,025, 0 shares, $25 realized, $0 unrealized, with a veto, a duplicate and a candle after Stop adding no
+fill or order. It exits 1 if any expected result is missing, writes `test-results/smoke-<time>/report.md` (plus a
+screenshot, logs and the database on failure), and stops the browser and every process it started, also on failure.
+`SMOKE_HEADED=1` shows the browser; `SMOKE_BROWSER_CHANNEL=` (empty) uses Playwright's own Chromium instead of Chrome.
+GitHub Actions runs the same command on every push (`.github/workflows/smoke.yml`), offline, without credentials.
+
+The test clock (`POST /api/test/clock`) and runtime test-double answers (`POST /api/test/provider`) exist only when
+the backend runs with `TEST_FEED=on`; they are never active in normal use.
+
+Live checks stay separate, documented observations in `docs/verification.md`: live Yahoo data (Prompts 5–8), live
+Claude image decisions (Prompts 10A–11) and the voice conversation (Prompt 13).
 
 Stop: press `Ctrl+C` in each terminal, or stop whatever is listening on the two ports:
 

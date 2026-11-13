@@ -1,0 +1,50 @@
+# Workstation SmokeTest on every push (Prompt 14).
+# Offline: labelled TEST fixtures, Yahoo off, provider test double. No credentials or secrets are used.
+name: SmokeTest
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend and test dependencies
+        run: python -m pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+      - name: Install the Playwright browser (Chromium) for this runner
+        run: python -m playwright install --with-deps chromium
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Unit tests
+        run: python -m unittest discover -s backend/tests -t . -v
+
+      - name: SmokeTest
+        env:
+          SMOKE_BROWSER_CHANNEL: ""        # use Playwright's Chromium on the runner
+        run: python -m backend.smoke
+
+      - name: Keep the SmokeTest report, screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-results
+          path: test-results/
+          if-no-files-found: ignore
