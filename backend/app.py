@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse  # noqa: E402
 from pydantic import BaseModel, Field
 
 from backend.candles import iso_ms
+from backend import automation  # noqa: E402  (also registers the simulator's pre-fill checks)
 from backend.chart_images import ImageRejected, stored_path
 from backend.decisions import create_snapshot, decide, get_decision, load_snapshot, make_provider
 from backend.indicator_store import add_config, delete_config, list_configs
@@ -43,6 +44,9 @@ TEST_FEED = os.environ.get("TEST_FEED", "off").lower() == "on"
 PAPER_ACCOUNT = os.environ.get("PAPER_ACCOUNT", "paper")
 PAPER_STARTING_CASH = float(os.environ.get("PAPER_STARTING_CASH", "1000"))
 PAPER_ORDER_SIZE = int(os.environ.get("PAPER_ORDER_SIZE", "1"))
+# Automation on TEST-labelled market data trades only in this disposable account (Prompt 12).
+PAPER_TEST_ACCOUNT = os.environ.get("PAPER_TEST_ACCOUNT", "paper-test")
+PAPER_TEST_STARTING_CASH = float(os.environ.get("PAPER_TEST_STARTING_CASH", "1000"))
 Timeframe = Literal["1m", "5m", "15m", "1h", "1d"]
 hub = LiveHub()
 
@@ -485,3 +489,136 @@ def read_decision_image(decision_id: int):
     if path is None or not path.exists():
         raise HTTPException(404, f"decision {decision_id} has no stored chart image")
     return FileResponse(path, media_type="image/png")
+
+
+# ---------------------------------------------------------------- paper automation (Prompt 12)
+
+class AutomationIn(BaseModel):
+    symbol: str = Field(min_length=1, max_length=20)
+    timeframe: Timeframe = "1m"
+    short: int = 5
+    long: int = 20
+
+
+def _automation_view(conn, body_symbol: str, timeframe: str, short: int, long: int) -> dict:
+    st = automation.state(conn, body_symbol, timeframe, short, long)
+    acct = None
+    if st is not None:
+        acct = automation.account_state(conn, st["account_id"])
+        acct = {k: acct[k] for k in ("account", "starting_cash", "cash", "positions", "fill_count")}
+    return {"state": st, "account": acct, "runs": automation.runs(conn, body_symbol, timeframe, short, long),
+            "max_decision_age_s": automation.DECISION_MAX_AGE_S}
+
+
+@app.post("/api/automation/start")
+def automation_start(body: AutomationIn) -> dict:
+    """Enable paper automation for one symbol, interval and SMA strategy (a new generation)."""
+    _check_windows(body.short, body.long)
+    conn = _paper_conn()
+    try:
+        sym = body.symbol.upper()
+        automation.start(conn, sym, body.timeframe, body.short, body.long, paper_account=PAPER_ACCOUNT,
+                         test_account=PAPER_TEST_ACCOUNT, test_starting_cash=PAPER_TEST_STARTING_CASH)
+        return _automation_view(conn, sym, body.timeframe, body.short, body.long)
+    finally:
+        conn.close()
+
+
+@app.post("/api/automation/stop")
+def automation_stop(body: AutomationIn) -> dict:
+    """Disable new executions, including runs still waiting for a model reply and pending automation orders."""
+    conn = _paper_conn()
+    try:
+        sym = body.symbol.upper()
+        automation.stop(conn, sym, body.timeframe, body.short, body.long)
+        return _automation_view(conn, sym, body.timeframe, body.short, body.long)
+    finally:
+        conn.close()
+
+
+@app.get("/api/automation/status")
+def automation_status(symbol: str, timeframe: Timeframe = "1m", short: int = 5, long: int = 20) -> dict:
+    conn = _paper_conn()
+    try:
+        return _automation_view(conn, symbol.upper(), timeframe, short, long)
+    finally:
+        conn.close()
+
+
+class RunIn(AutomationIn):
+    candle_time: str
+    chart_candles: int = Field(60, ge=5, le=500)
+
+
+@app.post("/api/automation/runs")
+def automation_claim(body: RunIn) -> dict:
+    """Claim one newly completed candle (deduplicated) and freeze its snapshot for the automation account."""
+    conn = _paper_conn()
+    try:
+        return automation.claim_run(conn, body.symbol.upper(), body.timeframe, body.short, body.long,
+                                    body.candle_time, order_size=PAPER_ORDER_SIZE, chart_candles=body.chart_candles)
+    except automation.AutomationError as exc:
+        raise HTTPException(409, str(exc)) from None
+    finally:
+        conn.close()
+
+
+class AnalyseIn(BaseModel):
+    image_png: str | None = None
+    capture: dict | None = None
+
+
+@app.post("/api/automation/runs/{run_id}/analyse")
+def automation_analyse(run_id: int, body: AnalyseIn) -> dict:
+    """Analyst + reviewer on the run's snapshot and PNG; an approved, eligible decision becomes a paper order."""
+    conn = _paper_conn()
+    try:
+        return automation.analyse_run(conn, run_id, make_provider(), body.image_png, body.capture)
+    except automation.AutomationError as exc:
+        raise HTTPException(404, str(exc)) from None
+    finally:
+        conn.close()
+
+
+class FailIn(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+@app.post("/api/automation/runs/{run_id}/fail")
+def automation_fail(run_id: int, body: FailIn) -> dict:
+    """Record that the chart or image was unavailable; nothing is executed."""
+    conn = _paper_conn()
+    try:
+        return {"run": automation.fail_run(conn, run_id, body.reason)}
+    except automation.AutomationError as exc:
+        raise HTTPException(404, str(exc)) from None
+    finally:
+        conn.close()
+
+
+class ApplyIn(BaseModel):
+    decision_id: int
+
+
+@app.post("/api/automation/apply")
+def automation_apply(body: ApplyIn) -> dict:
+    """Apply an automation decision (idempotent: a decision already handled returns its original outcome)."""
+    conn = _paper_conn()
+    try:
+        return automation.apply_decision(conn, body.decision_id)
+    except automation.AutomationError as exc:
+        raise HTTPException(409, str(exc)) from None
+    finally:
+        conn.close()
+
+
+@app.get("/api/automation/trace/{decision_id}")
+def automation_trace(decision_id: int) -> dict:
+    """Follow one decision ID: crossover, proposal, review, final check, order, fill or skip, account state."""
+    conn = _paper_conn()
+    try:
+        return automation.trace(conn, decision_id)
+    except automation.AutomationError as exc:
+        raise HTTPException(404, str(exc)) from None
+    finally:
+        conn.close()

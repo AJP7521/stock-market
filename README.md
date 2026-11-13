@@ -188,6 +188,28 @@ curl -X POST http://127.0.0.1:8000/api/decisions -H 'Content-Type: application/j
 `malformed_answer`, `timeout`, `provider_error`, `missing_input`. A live model can be asked about **test** market data;
 the response labels the market data source and the provider call separately.
 
+### Paper automation (reviewed decisions → paper account)
+
+The **Paper automation** panel (live mode) has **Start** and **Stop** for the current symbol, interval and SMA
+strategy. While it runs, every newly completed candle is analysed **once**: the backend claims the candle (unique per
+account, strategy, symbol, interval and candle in SQLite, so a reload or backend restart never repeats it) and freezes
+its snapshot; the panel renders that snapshot off screen and captures a fresh PNG with the same capture as Ask about
+chart; the analyst and reviewer decide. If the chart or image is unavailable the run is recorded as a failed analysis
+and nothing is executed.
+
+Only an **eligible, reviewer-approved** decision for the run's account and symbol becomes an order: buy and sell use
+`PAPER_ORDER_SIZE`, close exits the whole position, hold and wait record no order. The order fills at the next observed
+price, as for manual orders. Immediately before the fill Python rechecks cash or shares, that the decision is not
+already filled, that it is younger than `DECISION_MAX_AGE_S` (default 300 s after the candle completed) and that
+the same automation run is still enabled. The fill, balances, P&L row and decision ID are written in one transaction;
+otherwise the reason is recorded. **Stop** disables new executions: a model reply still pending is saved but not
+executed, and pending automation orders are rejected. Market data labelled **test** trades only in the disposable
+`PAPER_TEST_ACCOUNT` (default `paper-test`, `PAPER_TEST_STARTING_CASH` 1000). A manual chart question never creates an
+order.
+
+Each run's **Trace** button follows one decision ID: crossover → analyst proposal → reviewer verdict → Python final
+check → order and fill (or skip reason) → account state. The same data is at `GET /api/automation/trace/{decision_id}`.
+
 ### Agent review (analyst + reviewer)
 
 `POST /api/decisions` makes **two separate model calls** by default (`"review": false` turns the reviewer off). The

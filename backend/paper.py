@@ -24,6 +24,16 @@ Simulated fill rule (first implementation)
 * Each request carries a stable request_id. Retrying the same request_id returns the
   original order (and fill) and never creates another one.
 
+Decision-linked orders (Prompt 12)
+----------------------------------
+* An order placed for a reviewed decision carries its decision_id (one order per decision: a partial UNIQUE
+  index), and its fill copies the decision_id, so the fill, balances, P&L row and decision ID are written in the
+  same transaction.
+* Immediately before such a fill, every check registered in FILL_CHECKS runs inside the fill's transaction (the
+  automation module registers: decision age, already handled, automation still running). A failing check rejects
+  the order with its reason instead of filling it. ORDER_DECIDED hooks run in the same transaction after a fill
+  or rejection (the automation module records the outcome on its run).
+
 Money is stored as integer micro-dollars (1e-6 USD), so 100 * 4 shares or prices with
 four decimals are exact. The API converts to dollars for display.
 """
@@ -84,12 +94,24 @@ CREATE TABLE IF NOT EXISTS paper_fills (
 """
 
 
+# Hooks for decision-linked orders (filled in by backend.automation): f(conn, order: dict, received_ms) -> reason | None
+FILL_CHECKS: list = []
+# f(conn, order_id, status, fill_id | None, reason | None), called inside the fill/rejection transaction
+ORDER_DECIDED: list = []
+
+
 class PaperError(ValueError):
     """A request that cannot be accepted, with a readable reason."""
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    for table in ("paper_orders", "paper_fills"):
+        if "decision_id" not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN decision_id INTEGER")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS paper_orders_one_per_decision ON paper_orders (decision_id) "
+                 "WHERE decision_id IS NOT NULL")
+    conn.commit()
     ensure_pnl_schema(conn)
 
 
@@ -136,7 +158,8 @@ def _order(conn, order_id: int) -> dict:
 
 
 def execute(conn: sqlite3.Connection, account_id: str, symbol: str, action: str, quantity: int | None,
-            request_id: str, submitted_ms: int | None = None, origin: str = "manual") -> dict:
+            request_id: str, submitted_ms: int | None = None, origin: str = "manual",
+            decision_id: int | None = None) -> dict:
     """The single execution function for manual and agent requests.
 
     Returns {"action", "order": order dict or None, "duplicate": bool, "note": str}.
@@ -160,10 +183,11 @@ def execute(conn: sqlite3.Connection, account_id: str, symbol: str, action: str,
             note = f"wait: staying in cash; no order" + (f" (note: {held} shares are held)" if held else "")
         return {"action": action, "order": None, "duplicate": False, "note": note}
 
-    existing = conn.execute("SELECT id FROM paper_orders WHERE request_id = ?", (request_id,)).fetchone()
+    existing = conn.execute("SELECT id FROM paper_orders WHERE request_id = ? OR (decision_id IS NOT NULL AND "
+                            "decision_id = ?)", (request_id, decision_id)).fetchone()
     if existing:                                            # retry of the same request: no new order or fill
         return {"action": action, "order": _order(conn, existing[0]), "duplicate": True,
-                "note": "duplicate request_id: returning the original order"}
+                "note": "duplicate request_id or decision: returning the original order"}
 
     submitted_ms = submitted_ms if submitted_ms is not None else now_ms()
     reason = None
@@ -183,9 +207,10 @@ def execute(conn: sqlite3.Connection, account_id: str, symbol: str, action: str,
     with conn:
         order_id = conn.execute(
             """INSERT INTO paper_orders (request_id, account_id, symbol, side, quantity, submitted_ms, status,
-                   reason, decided_ms, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   reason, decided_ms, origin, decision_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (request_id, account_id, symbol, action, qty_value, submitted_ms,
-             "rejected" if reason else "pending", reason, submitted_ms if reason else None, origin)).lastrowid
+             "rejected" if reason else "pending", reason, submitted_ms if reason else None, origin,
+             decision_id)).lastrowid
     note = f"rejected: {reason}" if reason else "accepted: pending until the next observed price"
     return {"action": action, "order": _order(conn, order_id), "duplicate": False, "note": note}
 
@@ -209,11 +234,11 @@ def process_observation(conn: sqlite3.Connection, observation: dict) -> list[dic
     results = []
     for order_id in pending:
         with conn:   # one transaction: recheck, fill, order status, cash and position
-            o = conn.execute("SELECT account_id, side, quantity, status FROM paper_orders WHERE id = ?",
+            o = conn.execute("SELECT account_id, side, quantity, status, decision_id FROM paper_orders WHERE id = ?",
                              (order_id,)).fetchone()
             if o is None or o[3] != "pending":
                 continue
-            account_id, side, qty = o[0], o[1], o[2]
+            account_id, side, qty, decision_id = o[0], o[1], o[2], o[4]
             cash = conn.execute("SELECT cash_micros FROM paper_accounts WHERE id = ?", (account_id,)).fetchone()[0]
             held = _position(conn, account_id, symbol)
             if side == "close":
@@ -225,9 +250,15 @@ def process_observation(conn: sqlite3.Connection, observation: dict) -> list[dic
                           f"{dollars(cost):.2f} > {dollars(cash):.2f}")
             elif side in ("sell", "close") and (qty <= 0 or qty > held):
                 reason = f"insufficient shares at fill: need {qty}, hold {held}"
+            if reason is None and decision_id is not None:
+                order = {"id": order_id, "account_id": account_id, "symbol": symbol, "side": side,
+                         "decision_id": decision_id}
+                reason = next((r for r in (check(conn, order, received) for check in FILL_CHECKS) if r), None)
             if reason:
                 conn.execute("UPDATE paper_orders SET status = 'rejected', reason = ?, decided_ms = ? WHERE id = ?",
                              (reason, received, order_id))
+                for hook in ORDER_DECIDED:
+                    hook(conn, order_id, "rejected", None, reason)
                 results.append(_order(conn, order_id))
                 continue
             new_cash = cash - cost if side == "buy" else cash + cost
@@ -240,12 +271,15 @@ def process_observation(conn: sqlite3.Connection, observation: dict) -> list[dic
                          (qty, received, order_id))
             conn.execute(
                 """INSERT INTO paper_fills (order_id, account_id, symbol, side, quantity, price, price_micros,
-                       observation_id, observation_time_ms, executed_ms, cash_after_micros, position_after)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       observation_id, observation_time_ms, executed_ms, cash_after_micros, position_after,
+                       decision_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (order_id, account_id, symbol, side, qty, observation["price"], price_micros, observation["id"],
-                 observation["source_time_ms"], received, new_cash, new_pos))
+                 observation["source_time_ms"], received, new_cash, new_pos, decision_id))
             fill_id = conn.execute("SELECT id FROM paper_fills WHERE order_id = ?", (order_id,)).fetchone()[0]
             record_fill(conn, fill_id)     # P&L row and cost basis in the same transaction as the fill
+            if decision_id is not None:
+                for hook in ORDER_DECIDED:
+                    hook(conn, order_id, "filled", fill_id, None)
         results.append(_order(conn, order_id))
     return results
 

@@ -10,6 +10,9 @@ const props = defineProps({
   label: { type: String, default: '' },
   sma: { type: Object, default: null },  // backend SMA result: points, crossovers, windows
   indicators: { type: Array, default: () => [] },  // configured indicators with their points
+  // {width, height} in CSS pixels: a fixed-size chart for capture. It is laid out synchronously, so a capture does
+  // not wait for the browser to draw a frame (a hidden page may not draw any).
+  fixedSize: { type: Object, default: null },
 })
 
 const container = ref(null)
@@ -98,13 +101,18 @@ function upsert(row) {
   if (!hovering) showLatest()
 }
 
-const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve))
+// One animation frame, or 50 ms if the page draws no frames (hidden).
+const nextFrame = () => new Promise((resolve) => {
+  const t = setTimeout(resolve, 50)
+  requestAnimationFrame(() => { clearTimeout(t); resolve() })
+})
 
 /**
  * PNG data URL of the chart canvas only (candles, volume, lines, markers; no legend or page),
- * using Lightweight Charts' own image export. Waits for pending layout and fitContent first.
+ * using Lightweight Charts' own image export. Fits all candles first.
  */
 async function capture() {
+  chart.timeScale().fitContent()
   await nextFrame()
   await nextFrame()
   return chart.takeScreenshot(true, false).toDataURL('image/png')
@@ -117,7 +125,8 @@ const fmt = (v) => (v === null || v === undefined ? '—' : Number(v.toFixed(4))
 
 onMounted(() => {
   chart = createChart(container.value, {
-    autoSize: true,
+    ...(props.fixedSize ? { autoSize: false, width: props.fixedSize.width, height: props.fixedSize.height }
+                        : { autoSize: true }),
     layout: { attributionLogo: true },
     timeScale: { timeVisible: true, secondsVisible: false },
     crosshair: { mode: 0 }, // normal: the crosshair follows the pointer

@@ -677,3 +677,86 @@ TESTSMA, SMA 2/3, cutoff 15:04, **Ask about chart**.
 - The key does not appear in the DB or logs. Backend, Vite and the browser tab were stopped/closed.
 
 **Not exercised:** a live rejection or live timeout (covered by mocked tests); a live OpenAI review.
+
+---
+
+## Prompt 12 · Apply a reviewed decision to the paper account (2026-11-13)
+
+### Trace before the change
+One saved decision: completed candle → `create_snapshot(candle_time)` (crossover, cash, position) → analyst proposal
+→ reviewer verdict → `final_check` (Prompt 11). Simulator: `paper.execute()` creates a pending order;
+`paper.process_observation()` fills it at the next observed price in one transaction (cash, position, order status,
+`paper_fills`, `pnl.record_fill`). No package needed.
+
+### Unit tests (**test data** TESTAUTO with explicit times, **provider test double**)
+`python3 -m unittest discover -s backend/tests -t .` → **102 tests, OK** (12 new in `test_automation.py`):
+- Approved buy on the 15:04 up crossover → order pending with the decision_id → next price 20 fills it: `paper-test`
+  cash $980, 1 share, fill `decision_id` = the decision, one P&L fill row, run `filled`; trace crossover up → buy →
+  accept → eligible → fill 20 → $980 / 1; the main `paper` account unchanged.
+- Same decision applied again, then the database reopened (restart), the candle claimed again and the decision applied
+  again → `duplicate`, still 1 order, 1 fill, $980, 1 share.
+- Vetoed proposal (reject_unsupported_signal) → run `skipped` ("reviewer accepted" failed), no order, $1,000 / 0.
+- Stop while the reviewer reply is pending → run `stopped`, decision saved (eligible) but no order.
+- Stop with a pending order → order rejected "automation stopped before the fill"; a new generation also blocks it.
+- Fill 360 s after the candle completed → rejected "decision too old at fill" (limit 300 s).
+- Approved wait → `no_order`, no order row.
+- Claiming while stopped, or a candle that completed before Start → refused.
+- Chart unavailable (fail_run) or unreadable image → `failed_analysis`, nothing executed.
+- A manual (Ask about chart) decision → `apply_decision` refuses: no order.
+
+### Browser SmokeTest, attempt 1 (real clock, **test prices**, **mocked provider**) — FAILED
+Services: `MARKET_DB=$SCRATCHPAD/smoke12/smoke.sqlite LIVE_FEED=off TEST_FEED=on DECISIONS_PROVIDER=test
+DECISIONS_TEST_ANSWERS=action=buy,crossover=up,evidence=sufficient,verdict=accept` + Vite; a feeder posted TESTAUTO
+test prices 13, 10, 7, 13, 19 at hh:mm:03 of consecutive minutes from 03:28, then 21 at 03:33:30, 5 at 03:34:05.
+- Start was pressed at 03:27:31, before the first test price existed, so automation chose the main `paper` account.
+  Stopped immediately (no run had been created). **Fix:** `claim_run` routes again when test data is present.
+- After restarting and pressing Start at 03:28:09 (`paper-test`): the 03:30 run waited ~3 min in the chart capture.
+  The browser pane was hidden, so `requestAnimationFrame` did not run and the capture (and the chart's auto-size)
+  never completed; it finished at 03:33:53 when a script I ran made the page draw a frame. Because the panel
+  processed only the newest completed candle, the 03:31 candle was never analysed, and the buy order for the 03:32
+  crossover was submitted at 03:33:54, after the 21 price, so it filled at 5 (03:34:05) instead: cash $995, 1 share.
+  Fill rules themselves behaved correctly (next price after submission, decision_id on the fill, age 65 s).
+- Evidence kept in `$SCRATCHPAD/smoke12/attempt1/`.
+
+**AutoLoop cycle 1:** the capture chart now has a fixed 800×400 size (laid out without waiting for a frame), each
+frame wait falls back to 50 ms, the capture has a 15 s limit (a timeout records a failed analysis), and the panel
+processes every unhandled candle completed since Start, oldest first.
+
+### Browser SmokeTest, attempt 2 (real clock, **test prices**, **mocked provider**) — PASSED
+Fresh disposable DB; the same feeder from 03:36:03; Start at 03:36:19 after the first price (account `paper-test`,
+starting cash $1,000; main account `paper` $1,000). The pane stayed hidden and was not touched while candles closed.
+
+| Candle (UTC) | Crossover (Python) | Analyst / reviewer (mock) | Outcome | Account after |
+|---|---|---|---|---|
+| 03:36, 03:37 | – | – | failed analysis: SMA warm-up | $1,000 / 0 |
+| 03:38 | none | buy / accept | skipped: strategy allows wait; chart crossover conflict (captured in 43 ms) | $1,000 / 0 |
+| 03:39 | none | buy / accept | skipped (same) | $1,000 / 0 |
+| 03:40 | **up** | buy / accept | eligible → order #1 submitted 03:41:02 → **filled at 21** (observation #6, 03:41:30) | **$979 / 1** |
+| 03:41 | none (position 1) | buy / accept | skipped: strategy allows hold | $979 / 1 |
+| 03:42 | **down** (position 1) | close / **reject_unsupported_signal** | **vetoed**: skipped, no order | **$979 / 1** |
+
+- Expected after the approved decision: 1 fill, cash 1000 − 21 = $979, position 1. Observed in SQLite and on screen:
+  `paper_fills` 1 (order 1, price 21, cash after 979.0, position 1, decision_id 3), `pnl_history` fill row
+  (979.0, 1), `paper-test` $979.00 / 1 share; `paper` still $1,000.00.
+- **Same approved decision twice:** `POST /api/automation/apply {"decision_id": 3}` ×2 → both "decision 3 was already
+  handled (filled)", order 1. Expected and observed: 1 order, 1 fill, $979, 1 share.
+- **Restart:** the backend was restarted (with vetoing replies) and the page reloaded at 03:42:15–03:42:27:
+  automation still enabled from SQLite (generation 1), 6 runs, none repeated (max one run per candle).
+- **Vetoed proposal:** decision 5 (close on the down crossover) rejected by the reviewer → skipped; account unchanged
+  ($979 / 1, 1 fill).
+- **Trace on screen** for decision 3: "Crossover: candle 2026-11-13 03:40 UTC closed 19; SMA2 16 vs SMA3 13: up ·
+  account then: $1,000.00, 0 shares" → "Analyst (MOCK, test-double): buy" → "Reviewer (MOCK, test-double): accept ·
+  … cash $1,000.00 ≥ cost of 1 share(s) at close $19.00 = $19.00" → "Python final check: eligible" → "Execution:
+  order #1 buy 1 · filled · filled at 21 (observation #6, 2026-11-13T03:41:30.097Z) · cash after $979.00, position 1"
+  → "P&L row: buy 1 at 21" → "Account now (paper-test): $979.00, 1 TESTAUTO shares, 1 fills". Decision 5: "down …
+  close … reject_unsupported_signal … not eligible (reviewer accepted) … no order · skipped". Both match SQLite.
+- The captured PNG for 03:38 shows the candles, both SMA lines and volume (rendered while the pane was hidden).
+- **Stop** → "Stopped", `automation_state.enabled = 0`. Services stopped; ports 8000 and 5173 free.
+- Observed: two `GET` requests at backend start-up on the brand-new DB failed with "database is locked" in
+  `recorder.connect` (`PRAGMA journal_mode=WAL`, two connections at once); the next poll succeeded. Pre-existing,
+  not changed here.
+
+All provider responses in this prompt were **mocked** (test double); no live model call was needed or made.
+
+**Not exercised in the browser:** Stop while a model reply is pending (unit test only), a decision too old at fill
+(unit test only), automation on live Yahoo data, sell/close fills by automation.

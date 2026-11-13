@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 11)
+## What exists today (after Prompt 12)
 
 ```
 browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
@@ -96,7 +96,9 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | Ask about chart panel: off-screen render of the frozen snapshot, `takeScreenshot` PNG, preview, questions, answers, checks | `frontend/src/AskChartPanel.vue`, `CandleChart.vue` (`capture()`), `App.vue` | exists |
 | Reviewer: second, separate call through the same provider client (verdict question), strategy rules, final check with every gate; saved under the same decision ID | `backend/review.py`, `backend/decisions.py` (`decide(review=True)`), `POST /api/decisions` (`review` defaults to true) | exists |
 | Reviewer verdict, observed values and final-check table in the panel | `frontend/src/AskChartPanel.vue` | exists |
-| Paper automation from reviewed decisions | – | planned (Prompt 12) |
+| Paper automation: start/stop (generation), runs deduplicated per account/strategy/symbol/interval/candle, apply only eligible approved decisions, pre-fill rechecks, trace | `backend/automation.py`, `/api/automation/*` | exists |
+| Orders and fills linked to a decision (`decision_id`, one order per decision), FILL_CHECKS / ORDER_DECIDED hooks inside the fill transaction | `backend/paper.py` | exists |
+| Automation panel: Start/Stop, polling for completed candles, off-screen render + capture, runs table, decision trace | `frontend/src/AutomationPanel.vue`, `App.vue` | exists |
 | Voice | – | planned (Prompt 13) |
 | SmokeTest command | – | planned (Prompt 14) |
 
@@ -272,4 +274,28 @@ decide(snapshot_id, provider, image?, review=True)
              review_json (reviewer request with the image as a file reference, response, latency, evidence),
              strategy_json, final_check_json, eligible_for_order. Paper tables untouched.
 Each role: one HTTP call, DECISIONS_TIMEOUT_S timeout, max_retries = 0.
+```
+
+## Paper automation path (Prompt 12)
+
+```
+Vue AutomationPanel  Start -> POST /api/automation/start  (automation_state: enabled, generation + 1, account:
+                                                           paper-test if the symbol's data is labelled test)
+  every 2 s: GET /api/history -> newest completed candle not yet in automation_runs
+    POST /api/automation/runs {candle_time}   claim: UNIQUE (account, strategy, symbol, interval, candle_ts);
+                                              only candles completed after Start; snapshot at that candle
+    render snapshot.chart off screen -> CandleChart.capture() -> PNG   (failure -> POST runs/{id}/fail)
+    POST /api/automation/runs/{id}/analyse {image_png, capture}
+        decide(review=True)  -> analyst + reviewer + final check (decisions row)
+        same generation still enabled?  no -> run "stopped" (reply saved, not executed)
+        apply_decision: eligible + verdict accept + same account/symbol
+            buy/sell (order size) / close (whole position) -> execute(origin=automation, decision_id,
+                request_id = auto:account:strategy:symbol:interval:candle) -> order pending
+            hold/wait -> no order;  otherwise run "skipped" with the failed gates
+next observation (live feed or TEST feed) -> paper.process_observation, per pending order, ONE transaction:
+    cash / shares recheck (simulator rule) + FILL_CHECKS: not already filled, decision age <= DECISION_MAX_AGE_S,
+    automation generation still enabled -> fill (paper_fills.decision_id) + balances + position + P&L row
+    + ORDER_DECIDED (run "filled") ; or rejection reason (run "rejected")
+Stop -> POST /api/automation/stop: enabled = 0; pending automation orders rejected
+GET /api/automation/trace/{decision_id}: crossover -> proposal -> review -> final check -> order/fill -> account
 ```

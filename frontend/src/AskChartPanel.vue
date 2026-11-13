@@ -159,7 +159,7 @@ const strategy = computed(() => decision.value?.request_sent?.input?.[0]?.conten
     <!-- Renders the frozen snapshot only (off screen); the PNG below is what the model receives. -->
     <div v-if="snapshot" class="offscreen" aria-hidden="true">
       <CandleChart ref="previewRef" :key="renderKey" :rows="snapshot.chart.candles" :sma="snapshot.chart.sma"
-                   :indicators="snapshot.chart.indicators" label="" />
+                   :indicators="snapshot.chart.indicators" label="" :fixed-size="{ width: 800, height: 400 }" />
     </div>
 
     <figure v-if="captured" class="capture" data-testid="ask-capture">

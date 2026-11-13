@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AskChartPanel from './AskChartPanel.vue'
+import AutomationPanel from './AutomationPanel.vue'
 import CandleChart from './CandleChart.vue'
 import IndicatorPanel from './IndicatorPanel.vue'
 import PaperPanel from './PaperPanel.vue'
@@ -452,6 +453,9 @@ onBeforeUnmount(() => {
       No recorded candles for {{ symbol }} yet; waiting for live updates…
     </p>
     <PaperPanel v-if="mode === 'live'" :symbol="symbol" />
+
+    <AutomationPanel v-if="mode === 'live' && symbol && symbol !== 'SAMPLE'" :symbol="symbol" :timeframe="timeframe"
+                     :sma-short="smaShort" :sma-long="smaLong" />
 
     <IndicatorPanel :symbol="mode === 'replay' ? (replaySymbol.trim().toUpperCase() || symbol) : symbol"
                     @changed="indicatorsChanged" />
