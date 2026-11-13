@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 10)
+## What exists today (after Prompt 10A)
 
 ```
 browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
@@ -90,7 +90,11 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | `.env` loader (does not override the environment; never logs values) | `backend/settings.py`, `.env.example` | exists |
 | Decision snapshots (frozen candle, SMAs, crossover, account; as-of aware; incomplete = ineligible) and decisions (provider call, rule check, explanation, one decision ID) | `backend/decisions.py`, `/api/decisions*` | exists |
 | Decision providers: Claude Messages API (`anthropic` SDK, structured-output choice) (default) and OpenAI `POST /v1/decisions` (`DECISIONS_PROVIDER=openai`) | `backend/decisions.py` | exists |
-| Chart capture ("Ask about chart"), review, automation | – | planned (Prompts 10A–12) |
+| Chart snapshot at a selected completed candle (decision time = when it completed; chart section with candles, SMA and indicator lines through the cutoff) | `backend/decisions.py` (`create_snapshot(candle_time=…)`) | exists |
+| PNG check (base64, signature, chunk CRCs, IHDR/IEND, decompressed size) and capture storage beside the database | `backend/chart_images.py` | exists |
+| Three chart questions (action, crossover, evidence), checks by name, eligibility; provider test double (`DECISIONS_PROVIDER=test`) | `backend/decisions.py`, `GET /api/decisions/{id}/image` | exists |
+| Ask about chart panel: off-screen render of the frozen snapshot, `takeScreenshot` PNG, preview, questions, answers, checks | `frontend/src/AskChartPanel.vue`, `CandleChart.vue` (`capture()`), `App.vue` | exists |
+| Review, automation | – | planned (Prompts 11–12) |
 | Voice | – | planned (Prompt 13) |
 | SmokeTest command | – | planned (Prompt 14) |
 
@@ -227,4 +231,25 @@ POST /api/decisions {snapshot_id} (or settings to create one)
     -> explain() from snapshot facts; decisions row (proposal, backend facts, request/response, latency)
     -> eligible_for_order only for a valid decision on a complete application snapshot
 The paper tables are never written on this path.
+```
+
+## Ask about chart path (Prompt 10A)
+
+```
+AskChartPanel (cutoff = a completed candle, candles shown = N)
+  1. POST /api/decisions/snapshots {symbol, timeframe, short, long, candle_time, chart_candles, as_of?}
+       decision time = when the cutoff candle completed (never later than as_of / now)
+       -> snapshot as in Prompt 10 + chart {range, candles (last N completed through the cutoff),
+                                             sma (points, crossovers), indicators (configured lines)}
+  2. render snapshot.chart in an off-screen CandleChart (same adapter as the dashboard)
+       -> chart.takeScreenshot(true) -> PNG data URL (canvas only) -> preview with symbol, interval, cutoff
+  3. POST /api/decisions {snapshot_id, image_png, capture {snapshot_id, symbol, interval, cutoff}}
+       chart_images.read_png (unreadable -> 422 + recapture text) ; check_capture (mismatch -> 422)
+       store_png -> <db folder>/captures/snapshot-<id>-<sha16>.png
+       build_request: one user message [input_text, input_image (data URL), input_json (snapshot)],
+                      questions action + crossover + evidence
+       provider (Claude: image block + structured output with three enum fields; OpenAI; test double)
+       check_rules(action) + chart_checks(crossover vs Python crossover, readable, evidence sufficient)
+       decisions row: answers, questions, chart checks, image path + sha256 (request stored with a file reference)
+  4. panel shows what was asked, the answers, the checks and eligibility. Paper tables are never written.
 ```

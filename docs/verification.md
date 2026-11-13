@@ -539,3 +539,78 @@ the DB created with `write_sma_fixture` (labelled TESTSMA test observations). `.
 
 **Not exercised:** a live OpenAI request (no OpenAI key); a live timeout or refusal (covered only by controlled tests);
 decisions on live Yahoo data; any UI (chart capture comes in Prompt 10A).
+
+---
+
+## Prompt 10A · Ask the decision API about a chart screenshot (2026-11-12)
+
+### CHECK (no install needed)
+- Lightweight Charts 5.2.1 (already in `frontend/package.json`) has `IChartApi.takeScreenshot(addTopLayer, includeCrosshair)`
+  returning a canvas (`node_modules/lightweight-charts/dist/typings.d.ts:1767`). Used with `addTopLayer = true` so the
+  crossover markers (a series primitive) are included.
+- The PNG check uses only the Python standard library (`base64`, `struct`, `zlib`). No package or manifest changed.
+- Provider: Claude (the default since Prompt 10). Claude has no `/v1/decisions` endpoint, so the provider-neutral
+  request (input_text + input_image + input_json in one user message, three named questions) becomes one Claude user
+  message `[text, image (base64 PNG), snapshot JSON text, questions text]` and a structured output with three enum fields.
+
+### Unit tests (**test data**, generated PNGs, **provider test double**)
+`python3 -m unittest discover -s backend/tests -t .` → **82 tests, OK** (12 new in `test_chart_decisions.py`):
+- PNG check: a valid PNG passes with width, height, bytes, sha256; rejected: invalid base64, non-PNG media type,
+  wrong signature, damaged chunk (CRC), truncated file, empty, pixel data shorter than the header promises.
+- Snapshot at the 15:04 TESTSMA candle: decision time 15:05:00Z, close 19, crossover up, chart = 15:00–15:04 with the
+  15:04 up crossover; `chart_candles = 3` shows 15:02–15:04 while SMA3 at 15:02 still uses earlier candles; a forming or
+  unknown candle makes the snapshot incomplete.
+- Test double: received `input_text, input_image, input_json` in one user message and the three questions; the PNG it
+  received, the stored file and the original bytes are identical; the stored request holds `stored:<path> sha256:<…>`
+  instead of base64; all checks pass, eligible, `call_kind = mock`, no paper orders.
+- Ineligible but `decided`/`valid`: crossover conflict (none vs up), unreadable, missing crossover, missing evidence,
+  insufficient evidence, out-of-range crossover value; each names the failed check in the explanation.
+- Missing action → `malformed_answer`. Unreadable image, mismatched capture (cutoff) and a snapshot without a chart
+  section → `ImageRejected` before any provider call; no decision stored.
+- Text-only decisions (Prompt 10) still ask one question and have no image.
+- Claude translation with an image: one message, blocks `text, image, text, text`, `media_type image/png`, schema
+  properties `action, crossover, evidence`, crossover enum `up, down, none, unreadable`.
+
+### Browser SmokeTest (built-in browser; **test data**; **provider test double**)
+Services: `MARKET_DB=$SCRATCHPAD/smoke10a/smoke.sqlite LIVE_FEED=off DECISIONS_PROVIDER=test
+DECISIONS_TEST_ANSWERS=action=buy,crossover=up,evidence=sufficient python3 -m uvicorn backend.app:app --port 8000` and
+`npx vite` (5173). The DB holds the TESTSMA fixture (all `source = test`) plus one configured indicator, Range2
+(`price_range`, window 2). The browser pane was hidden, so the tab was given a 1280×900 viewport for the run.
+
+| # | Step | Expected | Observed | Result |
+|---|---|---|---|---|
+| 1 | Open `?symbol=TESTSMA&interval=1m`, SMA 2/3, Apply | recorded crossovers listed | "Crossovers: up 15:04Z, down 15:06Z, up 15:07Z" (15:07 has completed on the real clock) | pass |
+| 2 | Cutoff 15:04 UTC, 60 candles, **Ask about chart** | preview with symbol, interval, cutoff | "TESTSMA · 1m · cutoff 2026-11-09 15:04 UTC · snapshot #1 · 5 candles 15:00 → 15:04 UTC · decision time 2026-11-09T15:05:00.000Z · market data: TEST data (labelled fixture, SQLite)" | pass |
+| 3 | Inspect the captured PNG | chart only, through the cutoff | 1596×800 PNG (device pixel ratio 2): candles, volume, blue SMA2 and orange SMA3, "Cross up" arrow at 15:04, Range2 pane; no legend, controls or page; last candle 15:04 | pass |
+| 4 | Test double received a decodable PNG matching the saved capture | same sha256 | received `decodable: true, 1596×800, 70297 bytes, sha256 94f3698c…`; stored file and `image_json` the same sha256; `GET /api/decisions/1/image` → 200 image/png, same bytes | pass |
+| 5 | Displayed answers vs SQLite | equal | screen: action buy (✓ cash covers 1 share), crossover up ("Python calculated up: match"), evidence sufficient, "Eligible for automated execution", "MOCK (provider test double)"; `decisions` row 1: test-double/mock, decided, buy, valid, eligible 1, answers `{"action": "buy", "crossover": "up", "evidence": "sufficient"}` | pass |
+| 6 | Order count | unchanged | `paper_orders` 0, `paper_fills` 0 | pass |
+| 7 | Unreadable image (browser PNG export forced to return a cut-off data URL, then the button clicked) | rejection with what to recapture | panel: "the image is not valid base64 (Incorrect padding) / What to do: Recapture the chart with the Ask about chart button…"; no decision row added (still 1) | pass |
+| 8 | API: truncated PNG; capture with interval 5m and cutoff 15:03 for snapshot 1 | 422, nothing stored | "the PNG is truncated (chunk b'IHDR' runs past the end)"; "the capture does not match the snapshot: interval '5m' (snapshot: '1m'); cutoff …" with "Recapture TESTSMA 1m with the cutoff at 2026-11-09T15:04:00Z (snapshot 1)." | pass |
+
+### Live image request (**live model call** on **test market data**)
+The backend was restarted on the same disposable DB without `DECISIONS_PROVIDER`, so `.env` selected Claude
+(`anthropic`, `claude-opus-5-5`, live). In the browser: cutoff 15:04 → **Ask about chart**.
+
+| Field | Screen | SQLite `decisions` row 2 | Match |
+|---|---|---|---|
+| snapshot / decision | snapshot #3, decision #2 | snapshot_id 3, id 2 | yes |
+| model call | "live (anthropic, claude-opus-5-5, 2868 ms)" | anthropic / claude-opus-5-5 / live / 2868 | yes |
+| action | buy, ✓ cash covers 1 share(s) at the candle close ($19.00) | proposal buy, validation valid | yes |
+| crossover | up, "Python calculated up: match" | answers crossover up | yes |
+| evidence | sufficient | answers evidence sufficient | yes |
+| eligibility | "Eligible for automated execution" | eligible_for_order 1 | yes |
+
+- Claude's actual reply text: `{"action":"buy","crossover":"up","evidence":"sufficient"}`, `stop_reason end_turn`, no
+  fallback block, 3015 input / 28 output tokens.
+- The capture was byte-identical to the test-double run (same sha256 `94f3698c…`): the frozen snapshot renders
+  deterministically. Stored request: `stored:captures/snapshot-3-94f3698cbdd82a78.png sha256:…`.
+- Paper account untouched (`paper_orders` 0, `paper_fills` 0). The key does not appear in the DB or any log; the
+  backend log has no errors. Backend, Vite and the browser tab were stopped/closed; ports 8000 and 5173 free.
+
+**Not exercised / notes:**
+- The SmokeTest was driven step by step in the built-in browser; the one-command SmokeTest is Prompt 14.
+- A live OpenAI image request (no OpenAI key); replay-mode use of the panel (it passes the replay time as `as_of`, but
+  was not run in replay).
+- The chart shows the dashboard's own "Cross up" markers, so the model can read the crossover from the marker as
+  well as from the lines.

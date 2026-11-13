@@ -98,7 +98,19 @@ function upsert(row) {
   if (!hovering) showLatest()
 }
 
-defineExpose({ upsert })
+const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve))
+
+/**
+ * PNG data URL of the chart canvas only (candles, volume, lines, markers; no legend or page),
+ * using Lightweight Charts' own image export. Waits for pending layout and fitContent first.
+ */
+async function capture() {
+  await nextFrame()
+  await nextFrame()
+  return chart.takeScreenshot(true, false).toDataURL('image/png')
+}
+
+defineExpose({ upsert, capture })
 
 // Display only: values were compared at full precision in Python.
 const fmt = (v) => (v === null || v === undefined ? '—' : Number(v.toFixed(4)).toString())

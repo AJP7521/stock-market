@@ -183,3 +183,9 @@ def validate_settings(type_key: str, settings: dict) -> dict:
 
 def compute(type_key: str, candles: list[dict], settings: dict) -> list[dict]:
     return INDICATOR_TYPES[type_key]["compute"](candles, validate_settings(type_key, settings))
+
+
+def configured_values(configs: list[dict], candles: list[dict]) -> list[dict]:
+    """Values of each configured indicator, one point per candle (completed candles only)."""
+    return [{**cfg, "pane": INDICATOR_TYPES[cfg["type"]]["pane"], "units": INDICATOR_TYPES[cfg["type"]]["units"],
+             "points": compute(cfg["type"], candles, cfg["settings"])} for cfg in configs]

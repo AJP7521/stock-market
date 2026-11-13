@@ -16,6 +16,7 @@ node_modules/
 dist/
 
 # Local databases and test output
+captures/
 *.sqlite
 *.sqlite3
 *.db

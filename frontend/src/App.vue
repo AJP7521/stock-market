@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import AskChartPanel from './AskChartPanel.vue'
 import CandleChart from './CandleChart.vue'
 import IndicatorPanel from './IndicatorPanel.vue'
 import PaperPanel from './PaperPanel.vue'
@@ -282,6 +283,10 @@ const valueRows = computed(() => {
 })
 const fmt = (v) => (v === null || v === undefined ? '—' : Number(v.toFixed(4)).toString())
 
+// The latest candle, if it is still forming (not a valid cutoff for Ask about chart).
+const formingTimestamp = computed(() =>
+  latestStatus.value && !latestStatus.value.complete ? candles.value.at(-1)?.timestamp ?? null : null)
+
 const currentStep = computed(() =>
   replay.value && replayIndex.value > 0 ? replay.value.steps[replayIndex.value - 1] : null)
 
@@ -453,6 +458,10 @@ onBeforeUnmount(() => {
 
     <CandleChart ref="chartRef" :key="chartKey" :rows="candles" :label="chartLabel" :sma="sma"
                  :indicators="indicators" />
+
+    <AskChartPanel v-if="candles.length && symbol !== 'SAMPLE'" :symbol="symbol" :timeframe="timeframe"
+                   :candles="candles" :forming-timestamp="formingTimestamp" :sma-short="smaShort" :sma-long="smaLong"
+                   :as-of="mode === 'replay' ? currentStep?.replay_time ?? null : null" />
 
     <table v-if="indicators.length && candles.length" class="values" data-testid="indicator-values">
       <caption>Indicator values alongside the candles (latest first)</caption>

@@ -206,7 +206,8 @@ class ClaudeProviderTests(DecisionFixture):
         self.assertEqual((schema["required"], schema["additionalProperties"]), (["action"], False))
         self.assertEqual(params["model"], "claude-opus-5-5")
         self.assertIn("long-only PAPER trading simulation", params["system"])
-        self.assertIn('"symbol": "TESTFIXED"', params["messages"][0]["content"])
+        texts = [b["text"] for b in params["messages"][0]["content"] if b["type"] == "text"]
+        self.assertTrue(any('"symbol": "TESTFIXED"' in t for t in texts))
         self.assertEqual(params["fallbacks"], "default")
         json.dumps(params)
 

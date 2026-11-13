@@ -18,12 +18,14 @@ from backend.settings import load_env
 load_env()   # OPENAI_API_KEY and other settings from the ignored .env, before anything reads them
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect  # noqa: E402
+from fastapi.responses import FileResponse  # noqa: E402
 from pydantic import BaseModel, Field
 
 from backend.candles import iso_ms
+from backend.chart_images import ImageRejected, stored_path
 from backend.decisions import create_snapshot, decide, get_decision, load_snapshot, make_provider
 from backend.indicator_store import add_config, delete_config, list_configs
-from backend.indicators import INDICATOR_TYPES, compute, describe_types, sma_crossover, validate_windows
+from backend.indicators import configured_values, describe_types, sma_crossover, validate_windows
 from backend.live import LiveHub
 from backend.paper import PaperError, account_state, execute, fill_paper_orders, open_account
 from backend.pnl import history as pnl_history
@@ -265,12 +267,6 @@ def sma_indicator(
 
 # ---------------------------------------------------------------- configurable indicators (Prompt 9B)
 
-def configured_values(configs: list[dict], candles: list[dict]) -> list[dict]:
-    """Values of each configured indicator, one point per candle (completed candles only)."""
-    return [{**cfg, "pane": INDICATOR_TYPES[cfg["type"]]["pane"], "units": INDICATOR_TYPES[cfg["type"]]["units"],
-             "points": compute(cfg["type"], candles, cfg["settings"])} for cfg in configs]
-
-
 @app.get("/api/indicator-types")
 def indicator_types() -> dict:
     """Indicator types Vue can offer, with their settings, units, inputs and output."""
@@ -402,6 +398,8 @@ class SnapshotIn(BaseModel):
     short: int = 5
     long: int = 20
     as_of: str | None = None          # replay: only observations received by this time
+    candle_time: str | None = None    # Prompt 10A: freeze at this completed candle and add the chart section
+    chart_candles: int = Field(60, ge=5, le=500)
 
 
 @app.post("/api/decisions/snapshots", status_code=201)
@@ -411,7 +409,7 @@ def create_decision_snapshot(body: SnapshotIn) -> dict:
     conn = _paper_conn()
     try:
         return create_snapshot(conn, body.symbol.upper(), body.timeframe, body.short, body.long, PAPER_ACCOUNT,
-                               PAPER_ORDER_SIZE, _parse_as_of(body.as_of))
+                               PAPER_ORDER_SIZE, _parse_as_of(body.as_of), body.candle_time, body.chart_candles)
     finally:
         conn.close()
 
@@ -435,6 +433,8 @@ class DecisionIn(BaseModel):
     short: int = 5
     long: int = 20
     as_of: str | None = None
+    image_png: str | None = None      # Prompt 10A: data:image/png;base64,... captured from the snapshot's chart
+    capture: dict | None = None       # what the browser captured: snapshot_id, symbol, interval, cutoff
 
 
 @app.post("/api/decisions")
@@ -449,7 +449,12 @@ def create_decision(body: DecisionIn) -> dict:
             _check_windows(body.short, body.long)
             snapshot_id = create_snapshot(conn, body.symbol.upper(), body.timeframe, body.short, body.long,
                                           PAPER_ACCOUNT, PAPER_ORDER_SIZE, _parse_as_of(body.as_of))["snapshot_id"]
-        return decide(conn, snapshot_id, make_provider())
+        if body.image_png is not None and body.snapshot_id is None:
+            raise HTTPException(422, "a chart image needs the snapshot_id it was captured from")
+        try:
+            return decide(conn, snapshot_id, make_provider(), image=body.image_png, capture=body.capture)
+        except ImageRejected as exc:      # nothing stored, no provider call
+            raise HTTPException(422, {"problem": exc.problem, "recapture": exc.recapture}) from None
     finally:
         conn.close()
 
@@ -464,3 +469,17 @@ def read_decision(decision_id: int) -> dict:
     if d is None:
         raise HTTPException(404, f"no decision {decision_id}")
     return d
+
+
+@app.get("/api/decisions/{decision_id}/image")
+def read_decision_image(decision_id: int):
+    """The PNG the model was sent for this decision (stored beside the database)."""
+    conn = _paper_conn()
+    try:
+        d = get_decision(conn, decision_id)
+        path = stored_path(conn, d["image"]["path"]) if d and d["image"] else None
+    finally:
+        conn.close()
+    if path is None or not path.exists():
+        raise HTTPException(404, f"decision {decision_id} has no stored chart image")
+    return FileResponse(path, media_type="image/png")

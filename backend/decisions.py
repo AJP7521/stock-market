@@ -22,6 +22,15 @@ Two separate steps:
      provider_error    HTTP or connection error, or a missing API key
      missing_input     unknown or incomplete snapshot (no provider call)
    A valid hold or wait is a decision. Nothing here touches the paper account.
+
+3. Chart questions (Prompt 10A). create_snapshot(candle_time=...) freezes the snapshot as of the moment the
+   selected candle completed and adds a "chart" section (the completed candles, SMA lines and configured indicator
+   lines through that cutoff) so the browser renders and captures exactly those records. decide(image=...) checks
+   the PNG (chart_images.read_png) and that the capture matches the snapshot, stores the PNG beside the database,
+   sends it as input_image with the snapshot as input_json in the same user message, and asks three named
+   questions: action, crossover and evidence. Each answer is validated by name. An unreadable chart, a missing
+   answer, a visual crossover that conflicts with the Python crossover, or insufficient evidence makes the decision
+   ineligible for automated execution.
 """
 
 import json
@@ -34,10 +43,13 @@ import urllib.request
 from decimal import Decimal
 
 from backend.candles import iso_ms
-from backend.indicators import sma_crossover
+from backend.chart_images import ImageRejected, data_url, read_png, store_png
+from backend.indicator_store import list_configs
+from backend.indicators import configured_values, sma_crossover
 from backend.paper import ensure_schema as ensure_paper_schema
 from backend.recorder import now_ms
 from backend.series import candle_series
+from backend.timeframes import MINUTE_MS, to_ms
 
 ACTIONS = {
     "buy": "Buy the configured order size of whole shares (adds to the position). Needs enough cash.",
@@ -54,6 +66,31 @@ STRATEGY = (
     "position (close it, or sell the order size). Without a crossover, an open position is held and a flat "
     "account waits. Use only the snapshot data provided."
 )
+
+ACTION_QUESTION = {
+    "type": "choice", "name": "action",
+    "instructions": "Which action fits this paper position and the strategy rules at this candle?",
+    "choices": [{"value": v, "description": d} for v, d in ACTIONS.items()],
+}
+CHART_QUESTIONS = [
+    {"type": "choice", "name": "action",
+     "instructions": ("Which action fits this paper position and the strategy rules? Buy adds shares, sell reduces "
+                      "the position, hold keeps an open position, wait stays flat, and close exits the entire "
+                      "position."),
+     "choices": [{"value": v, "description": d} for v, d in ACTIONS.items()]},
+    {"type": "choice", "name": "crossover",
+     "instructions": ("At the selected candle (the last candle on the chart, at the cutoff), is an upward "
+                      "crossover, a downward crossover, or no crossover visible in the image?"),
+     "choices": [{"value": "up", "description": "The short SMA line crosses above the long SMA line at that candle."},
+                 {"value": "down", "description": "The short SMA line crosses below the long SMA line at that candle."},
+                 {"value": "none", "description": "No crossover is visible at that candle."},
+                 {"value": "unreadable", "description": "The image cannot be read well enough to tell."}]},
+    {"type": "choice", "name": "evidence",
+     "instructions": "Is the visible chart sufficient to assess the signal at the cutoff?",
+     "choices": [{"value": "sufficient", "description": "The chart shows enough to assess the signal at the cutoff."},
+                 {"value": "insufficient", "description": "The chart does not show enough to assess it."}]},
+]
+CHART_CANDLES_DEFAULT = 60
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS decision_snapshots (
@@ -92,8 +129,23 @@ CREATE TABLE IF NOT EXISTS decisions (
 """
 
 
+# Columns added after Prompt 10 (added to an existing table if missing).
+ADDED_COLUMNS = {
+    "questions_json": "TEXT",          # the named questions asked
+    "answers_json": "TEXT",            # every answer by name, as returned
+    "chart_checks_json": "TEXT",       # chart-answer checks (Prompt 10A)
+    "image_path": "TEXT",              # capture PNG, relative to the database folder
+    "image_json": "TEXT",              # width, height, bytes, sha256 of the capture
+}
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(decisions)")}
+    for name, kind in ADDED_COLUMNS.items():
+        if name not in have:
+            conn.execute(f"ALTER TABLE decisions ADD COLUMN {name} {kind}")
+    conn.commit()
 
 
 # --------------------------------------------------------------------------- snapshots
@@ -129,16 +181,56 @@ def _store_snapshot(conn, snap: dict) -> dict:
     return snap
 
 
+def _candle_end_ms(item: dict, interval: str) -> int:
+    if interval == "1m":
+        return to_ms(item["candle"]["timestamp"]) + MINUTE_MS
+    return to_ms(item["status"]["interval_end"])
+
+
+def _chart_section(conn, symbol: str, rows: list[dict], short: int, long: int, chart_candles: int) -> dict:
+    """The completed candles (last `chart_candles`) through the cutoff, with SMA and configured indicator lines."""
+    completed = [r for r in rows if r["complete"]]
+    sma = sma_crossover(completed, short, long)
+    shown = completed[-chart_candles:]
+    keep = {r["timestamp"] for r in shown}
+    indicators = configured_values(list_configs(conn, symbol), completed)
+    return {
+        "range": {"first": shown[0]["timestamp"] if shown else None, "last": shown[-1]["timestamp"] if shown else None,
+                  "candles": len(shown), "requested": chart_candles},
+        "candles": [{k: r[k] for k in ("timestamp", "open", "high", "low", "close", "volume")} for r in shown],
+        "sma": {**sma, "points": [p for p in sma["points"] if p["timestamp"] in keep],
+                "crossovers": [c for c in sma["crossovers"] if c["timestamp"] in keep]},
+        "indicators": [{**ind, "points": [p for p in ind["points"] if p["timestamp"] in keep]} for ind in indicators],
+    }
+
+
 def create_snapshot(conn: sqlite3.Connection, symbol: str, interval: str, short: int, long: int,
-                    account_id: str, order_size: int, as_of_ms: int | None = None) -> dict:
-    """Freeze the application data for one decision and store it. Never calls a model."""
+                    account_id: str, order_size: int, as_of_ms: int | None = None,
+                    candle_time: str | None = None, chart_candles: int | None = None) -> dict:
+    """Freeze the application data for one decision and store it. Never calls a model.
+
+    With `candle_time`, the decision time becomes the moment that candle completed (no later than `as_of_ms`),
+    and a chart section is added for rendering and capture. Without it, the last completed candle as of
+    `as_of_ms` is used (Prompt 10).
+    """
     as_of_ms = as_of_ms if as_of_ms is not None else now_ms()
+    missing = []
+    if candle_time is not None:
+        found = next((c for c in candle_series(symbol, interval, as_of_ms, conn=conn)["candles"]
+                      if c["candle"]["timestamp"] == candle_time), None)
+        if found is None:
+            missing.append(f"no {interval} candle at {candle_time} for {symbol}")
+        elif not found["status"]["complete"]:
+            missing.append(f"the {interval} candle at {candle_time} has not completed")
+        else:
+            as_of_ms = min(as_of_ms, _candle_end_ms(found, interval))
     series = candle_series(symbol, interval, as_of_ms, conn=conn)
     rows = [{**c["candle"], "complete": c["status"]["complete"]} for c in series["candles"]]
     completed = [r for r in rows if r["complete"]]
-    missing = []
     candle = indicators = None
-    if not completed:
+    if missing:
+        pass
+    elif not completed:
         missing.append("no completed candle at the decision time")
     else:
         last = completed[-1]
@@ -149,6 +241,8 @@ def create_snapshot(conn: sqlite3.Connection, symbol: str, interval: str, short:
                       "crossover_at_candle": point["signal"] or "none"}
         if point["short"] is None or point["long"] is None:
             missing.append(f"SMA warm-up: fewer than {long} completed candles")
+        if candle_time is not None and last["timestamp"] != candle_time:
+            missing.append(f"the last completed candle at the decision time is {last['timestamp']}, not {candle_time}")
     acct = _account_as_of(conn, account_id, as_of_ms)
     account = None
     if acct is None:
@@ -163,6 +257,8 @@ def create_snapshot(conn: sqlite3.Connection, symbol: str, interval: str, short:
         "candle": candle, "indicators": indicators, "account": account,
         "complete": not missing, "missing": missing,
     }
+    if candle_time is not None:
+        snap["chart"] = _chart_section(conn, symbol, rows, short, long, chart_candles or CHART_CANDLES_DEFAULT)
     return _store_snapshot(conn, snap)
 
 
@@ -200,23 +296,37 @@ def model_input(snapshot: dict) -> dict:
                                      "indicators", "account")}
 
 
-def build_request(snapshot: dict, model: str) -> dict:
-    return {
-        "model": model,
-        "input": [
-            {"role": "developer", "content": [{"type": "input_text", "text": STRATEGY}]},
-            {"role": "user", "content": [
-                {"type": "input_text", "text": "Decision snapshot for one completed candle (paper account):"},
-                {"type": "input_json", "data": model_input(snapshot)},
-            ]},
-        ],
-        "questions": [{
-            "type": "choice",
-            "name": "action",
-            "instructions": "Which action fits this paper position and the strategy rules at this candle?",
-            "choices": [{"value": v, "description": d} for v, d in ACTIONS.items()],
-        }],
-    }
+def build_request(snapshot: dict, model: str, image_url: str | None = None) -> dict:
+    """Provider-neutral request. With a chart image: input_image + input_json in one user message, three questions."""
+    if image_url is None:
+        content = [{"type": "input_text", "text": "Decision snapshot for one completed candle (paper account):"},
+                   {"type": "input_json", "data": model_input(snapshot)}]
+        questions = [ACTION_QUESTION]
+    else:
+        ind = snapshot["indicators"]
+        content = [{"type": "input_text", "text": (
+                       "Chart image of the decision snapshot: candles, volume, SMA lines and indicator lines through "
+                       f"the cutoff candle (the last candle shown). Blue line: short SMA({ind['sma_short_window']}); "
+                       f"orange line: long SMA({ind['sma_long_window']}); arrows mark crossovers; volume bars at the "
+                       "bottom of the price pane; other lines are configured indicators, labelled on the right "
+                       "axis. Then the snapshot data (paper account):")},
+                   {"type": "input_image", "image_url": image_url},
+                   {"type": "input_json", "data": model_input(snapshot)}]
+        questions = CHART_QUESTIONS
+    return {"model": model,
+            "input": [{"role": "developer", "content": [{"type": "input_text", "text": STRATEGY}]},
+                      {"role": "user", "content": content}],
+            "questions": questions}
+
+
+def stored_request(body: dict, image_ref: str | None) -> dict:
+    """The request as saved in SQLite: the image bytes are replaced by a reference to the stored PNG."""
+    if image_ref is None:
+        return body
+    user = body["input"][1]
+    content = [{"type": "input_image", "image_url": image_ref} if part["type"] == "input_image" else part
+               for part in user["content"]]
+    return {**body, "input": [body["input"][0], {**user, "content": content}]}
 
 
 class OpenAIDecisions:
@@ -260,23 +370,35 @@ CLAUDE_DEFAULT_MODEL = "claude-opus-5-5"
 def claude_params(body: dict) -> dict:
     """Translate the provider-neutral request (built by build_request) into a Claude Messages API request.
 
-    The named choice question becomes a structured-output schema: the reply must be {"action": <one of ACTIONS>}.
+    Each named choice question becomes one field of a structured-output schema, limited to its choices; for
+    example {"action": <one of ACTIONS>}. A chart image (input_image data URL) becomes a base64 image block in
+    the same user message, before the snapshot JSON.
     """
-    question = body["questions"][0]
-    choices = [c["value"] for c in question["choices"]]
-    guide = "\n".join(f"- {c['value']}: {c['description']}" for c in question["choices"])
-    user = body["input"][1]["content"]
+    questions = body["questions"]
+    blocks = []
+    for part in body["input"][1]["content"]:
+        if part["type"] == "input_text":
+            blocks.append({"type": "text", "text": part["text"]})
+        elif part["type"] == "input_image":
+            header, _, payload = part["image_url"].partition(",")
+            blocks.append({"type": "image", "source": {"type": "base64", "media_type": header[5:].split(";")[0],
+                                                       "data": payload}})
+        elif part["type"] == "input_json":
+            blocks.append({"type": "text", "text": json.dumps(part["data"], indent=2)})
+    asked = "\n\n".join(
+        f"Question '{q['name']}': {q['instructions']}\nAllowed answers:\n"
+        + "\n".join(f"- {c['value']}: {c['description']}" for c in q["choices"]) for q in questions)
+    blocks.append({"type": "text", "text": asked})
     return {
         "model": body["model"],
         "max_tokens": 4000,
         "system": body["input"][0]["content"][0]["text"],
-        "messages": [{"role": "user", "content": (
-            f"{user[0]['text']}\n{json.dumps(user[1]['data'], indent=2)}\n\n"
-            f"Question '{question['name']}': {question['instructions']}\nAllowed answers:\n{guide}")}],
+        "messages": [{"role": "user", "content": blocks}],
         "thinking": {"type": "adaptive"},
         "output_config": {"effort": "low", "format": {"type": "json_schema", "schema": {
-            "type": "object", "properties": {question["name"]: {"type": "string", "enum": choices}},
-            "required": [question["name"]], "additionalProperties": False}}},
+            "type": "object",
+            "properties": {q["name"]: {"type": "string", "enum": [c["value"] for c in q["choices"]]} for q in questions},
+            "required": [q["name"] for q in questions], "additionalProperties": False}}},
         # If the model declines, the API re-runs the request on a fallback model; response.model shows which ran.
         "betas": ["server-side-fallback-2026-07-01"],
         "fallbacks": "default",
@@ -329,16 +451,54 @@ def claude_answers(message, params: dict) -> list:
         reply = json.loads(text)
     except json.JSONDecodeError:
         return []
-    name = next(iter(params["output_config"]["format"]["schema"]["required"]))
-    if not isinstance(reply, dict) or name not in reply:
+    if not isinstance(reply, dict):
         return []
-    return [{"type": "choice", "name": name, "choice": reply[name], "probabilities": None, "confidence": None}]
+    return [{"type": "choice", "name": name, "choice": reply[name], "probabilities": None, "confidence": None}
+            for name in params["output_config"]["format"]["schema"]["required"] if name in reply]
+
+
+class TestDoubleDecisions:
+    """PROVIDER TEST DOUBLE (DECISIONS_PROVIDER=test): no network call; answers are fixed and labelled 'mock'.
+
+    It decodes any input_image it receives and reports the PNG's sha256 and size in its response, so a check can
+    prove the provider received a decodable PNG identical to the stored capture. Answers come from
+    DECISIONS_TEST_ANSWERS, e.g. "action=buy,crossover=up,evidence=sufficient" (default).
+    """
+
+    name = "test-double"
+    call_kind = "mock"
+    model = "test-double"
+
+    def __init__(self, answers: str | None = None):
+        spec = answers if answers is not None else os.environ.get(
+            "DECISIONS_TEST_ANSWERS", "action=buy,crossover=up,evidence=sufficient")
+        self.answers = dict(item.split("=", 1) for item in spec.split(",") if "=" in item)
+        self.received = []
+
+    def send(self, body: dict) -> dict:
+        self.received.append(body)
+        images = []
+        for part in body["input"][1]["content"]:
+            if part["type"] == "input_image":
+                try:
+                    _raw, info = read_png(part["image_url"])
+                    images.append({"decodable": True, **info})
+                except ImageRejected as exc:
+                    images.append({"decodable": False, "problem": exc.problem})
+        asked = [q["name"] for q in body["questions"]]
+        return {"model": self.model, "test_double": True, "received_images": images,
+                "answers": [{"type": "choice", "name": n, "choice": self.answers[n], "probabilities": None,
+                             "confidence": None} for n in asked if n in self.answers]}
 
 
 def make_provider():
-    """Claude (Anthropic) by default; DECISIONS_PROVIDER=openai selects OpenAI."""
+    """Claude (Anthropic) by default; DECISIONS_PROVIDER=openai selects OpenAI, =test the provider test double."""
     choice = os.environ.get("DECISIONS_PROVIDER", "claude").strip().lower()
-    return OpenAIDecisions() if choice == "openai" else ClaudeDecisions()
+    if choice == "openai":
+        return OpenAIDecisions()
+    if choice == "test":
+        return TestDoubleDecisions()
+    return ClaudeDecisions()
 
 
 # --------------------------------------------------------------------------- validation and explanation
@@ -376,7 +536,7 @@ def facts(snapshot: dict) -> dict:
 
 
 def explain(snapshot: dict, status: str, proposal: str | None, checks: list[dict], model: str,
-            error: str | None) -> str:
+            error: str | None, chart_answers: dict | None = None, visual: list[dict] | None = None) -> str:
     f = facts(snapshot) if snapshot.get("complete") else None
     parts = []
     if f:
@@ -394,6 +554,12 @@ def explain(snapshot: dict, status: str, proposal: str | None, checks: list[dict
         parts.append(f"No model call: {error}.")
     else:
         parts.append(f"No usable proposal ({status}): {error}.")
+    if chart_answers is not None and status == "decided":
+        parts.append(f"Chart answers: crossover {chart_answers.get('crossover', 'missing')} (Python calculated "
+                     f"{f['crossover_at_candle']}), evidence {chart_answers.get('evidence', 'missing')}.")
+        failed = [c["rule"] for c in visual or [] if not c["passed"]]
+        if failed:
+            parts.append("Not eligible for automated execution: " + "; ".join(failed) + " (failed).")
     return " ".join(parts)
 
 
@@ -407,8 +573,52 @@ def _store_decision(conn, **row) -> dict:
     return get_decision(conn, did)
 
 
-def decide(conn: sqlite3.Connection, snapshot_id: int, provider) -> dict:
-    """Ask the provider about one stored snapshot, validate the answer and store the decision."""
+def check_capture(snapshot: dict, capture: dict | None) -> None:
+    """The capture must describe the same snapshot (symbol, interval, cutoff candle), else it must be recaptured."""
+    if "chart" not in snapshot:
+        raise ImageRejected(f"snapshot {snapshot['snapshot_id']} has no chart section",
+                            "Freeze a new snapshot with Ask about chart; this snapshot was not made for a chart.")
+    capture = capture or {}
+    expected = {"snapshot_id": snapshot["snapshot_id"], "symbol": snapshot["symbol"],
+                "interval": snapshot["interval"], "cutoff": snapshot["candle"]["timestamp"]}
+    wrong = [f"{k} {capture.get(k)!r} (snapshot: {v!r})" for k, v in expected.items() if capture.get(k) != v]
+    if wrong:
+        raise ImageRejected("the capture does not match the snapshot: " + "; ".join(wrong),
+                            f"Recapture {snapshot['symbol']} {snapshot['interval']} with the cutoff at "
+                            f"{snapshot['candle']['timestamp']} (snapshot {snapshot['snapshot_id']}).")
+
+
+def chart_checks(answers: dict, snapshot: dict) -> list[dict]:
+    """Checks on the crossover and evidence answers; any failure makes the decision ineligible."""
+    python = snapshot["indicators"]["crossover_at_candle"]
+    crossover, evidence = answers.get("crossover"), answers.get("evidence")
+    allowed = {q["name"]: [c["value"] for c in q["choices"]] for q in CHART_QUESTIONS}
+    checks = [
+        {"rule": "a crossover answer is present", "passed": crossover in allowed["crossover"],
+         "observed": "missing" if crossover is None else repr(crossover)},
+        {"rule": "an evidence answer is present", "passed": evidence in allowed["evidence"],
+         "observed": "missing" if evidence is None else repr(evidence)},
+    ]
+    if crossover in allowed["crossover"]:
+        checks.append({"rule": "the chart image was readable", "passed": crossover != "unreadable",
+                       "observed": f"crossover answer {crossover}"})
+        if crossover != "unreadable":
+            checks.append({"rule": f"the visual crossover matches the Python crossover ({python})",
+                           "passed": crossover == python, "observed": f"model saw {crossover}"})
+    if evidence in allowed["evidence"]:
+        checks.append({"rule": "the chart is sufficient to assess the signal", "passed": evidence == "sufficient",
+                       "observed": f"evidence answer {evidence}"})
+    return checks
+
+
+def decide(conn: sqlite3.Connection, snapshot_id: int, provider, image: str | None = None,
+           capture: dict | None = None) -> dict:
+    """Ask the provider about one stored snapshot, validate the answers and store the decision.
+
+    With `image` (a PNG data URL captured from the snapshot's chart) the request carries the image and three
+    questions. An unreadable image or a capture of a different snapshot raises ImageRejected before any provider
+    call, and nothing is stored.
+    """
     ensure_schema(conn)
     snapshot = load_snapshot(conn, snapshot_id)
     base = {"snapshot_id": snapshot_id, "created_ms": now_ms(), "provider": provider.name,
@@ -423,12 +633,22 @@ def decide(conn: sqlite3.Connection, snapshot_id: int, provider) -> dict:
                                facts_json=json.dumps(facts(snapshot) if snapshot and snapshot["complete"] else {}),
                                request_json=None, response_json=None, error=error, latency_ms=None)
 
-    body = build_request(snapshot, provider.model)
+    image_path = image_info = None
+    if image is not None:
+        raw, image_info = read_png(image)           # raises ImageRejected: unreadable image
+        check_capture(snapshot, capture)            # raises ImageRejected: different snapshot
+        image_path = store_png(conn, snapshot_id, raw, image_info["sha256"])
+        image = data_url(raw)
+
+    body = build_request(snapshot, provider.model, image)
     started = time.monotonic()
     response = error = proposal = probabilities = confidence = None
+    answers: dict = {}
     try:
         response = provider.send(body)
-        answer = next((a for a in response.get("answers", []) if a.get("name") == "action"), None)
+        listed = response.get("answers", [])
+        answers = {a.get("name"): a.get("choice") for a in listed if isinstance(a, dict)}
+        answer = next((a for a in listed if a.get("name") == "action"), None)
         if answer is None:
             status, error = "malformed_answer", "no answer named 'action' in the response"
         elif answer.get("choice") not in ACTIONS:
@@ -446,15 +666,22 @@ def decide(conn: sqlite3.Connection, snapshot_id: int, provider) -> dict:
 
     checks = check_rules(proposal, snapshot) if status == "decided" else []
     valid = status == "decided" and all(c["passed"] for c in checks)
-    eligible = valid and snapshot["kind"] == "application" and snapshot["complete"]
+    visual = chart_checks(answers, snapshot) if image is not None and status == "decided" else []
+    eligible = (valid and snapshot["kind"] == "application" and snapshot["complete"]
+                and all(c["passed"] for c in visual))
+    image_ref = (f"stored:{image_path} sha256:{image_info['sha256']}" if image_path else None)
     return _store_decision(
         conn, **base, status=status, proposal=proposal,
         probabilities_json=json.dumps(probabilities) if probabilities is not None else None,
         confidence=confidence, validation_status=("valid" if valid else "invalid") if status == "decided"
         else "not_checked", validation_json=json.dumps(checks), eligible_for_order=int(eligible),
-        explanation=explain(snapshot, status, proposal, checks, provider.model, error),
-        facts_json=json.dumps(facts(snapshot)), request_json=json.dumps(body),
-        response_json=json.dumps(response) if response is not None else None, error=error, latency_ms=latency)
+        explanation=explain(snapshot, status, proposal, checks, provider.model, error, answers if image else None,
+                            visual),
+        facts_json=json.dumps(facts(snapshot)), request_json=json.dumps(stored_request(body, image_ref)),
+        response_json=json.dumps(response) if response is not None else None, error=error, latency_ms=latency,
+        questions_json=json.dumps(body["questions"]), answers_json=json.dumps(answers),
+        chart_checks_json=json.dumps(visual), image_path=image_path,
+        image_json=json.dumps(image_info) if image_info else None)
 
 
 def get_decision(conn: sqlite3.Connection, decision_id: int) -> dict | None:
@@ -472,5 +699,11 @@ def get_decision(conn: sqlite3.Connection, decision_id: int) -> dict | None:
         "validation": {"status": r["validation_status"], "checks": json.loads(r["validation_json"])},
         "eligible_for_order": bool(r["eligible_for_order"]), "explanation": r["explanation"],
         "error": r["error"], "latency_ms": r["latency_ms"],
+        "questions": json.loads(r["questions_json"] or "[]"),
+        "answers": json.loads(r["answers_json"] or "{}"),
+        "chart_checks": json.loads(r["chart_checks_json"] or "[]"),
+        "image": ({**json.loads(r["image_json"]), "path": r["image_path"], "url": f"/api/decisions/{r['id']}/image"}
+                  if r["image_path"] else None),
+        "request_sent": json.loads(r["request_json"]) if r["request_json"] else None,
         "snapshot": load_snapshot(conn, r["snapshot_id"]) if r["snapshot_id"] is not None else None,
     }

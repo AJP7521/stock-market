@@ -1,24 +1,26 @@
 # Current state: 2026-11-12
 
-**Last prompt:** 10 · Decision API (complete, not committed). Prompts 1–9D are committed (latest `0b1a51d`).
+**Last prompt:** 10A · Ask about chart (complete, not committed). Prompts 1–10 are committed (latest `338df1b`).
 
-## Files created or changed (Prompt 10)
-- New: `backend/decisions.py`, `backend/series.py` (`candle_series` moved out of `app.py`), `backend/settings.py`
-  (`.env` loader), `backend/tests/test_decisions.py` (15 tests), `.env.example`
-- Updated: `backend/app.py` (`/api/decisions`, `/api/decisions/snapshots`, `.env` loading), `backend/requirements.txt`
-  (`anthropic==2.8.0`), `README.md`, `docs/design-pipeline.md`, `docs/verification.md`
-- Local only (ignored): `.env` with `DECISIONS_PROVIDER=claude` and `ANTHROPIC_API_KEY`
-- Installed: `anthropic` 2.8.0 into system Python 3.14 (approved by the student)
+## Files created or changed (Prompt 10A)
+- New: `backend/chart_images.py` (PNG check and storage), `backend/tests/test_chart_decisions.py` (12 tests),
+  `frontend/src/AskChartPanel.vue`
+- Updated: `backend/decisions.py` (snapshot at a selected candle with a chart section; image + three questions;
+  chart checks; test-double provider), `backend/app.py` (image fields, `GET /api/decisions/{id}/image`),
+  `backend/indicators.py` (`configured_values` moved here from `app.py`), `backend/tests/test_decisions.py`,
+  `frontend/src/CandleChart.vue` (`capture()`), `frontend/src/App.vue`, `.gitignore` (`captures/`), `.env.example`,
+  `README.md`, `docs/design-pipeline.md`, `docs/verification.md`
+- No packages installed or manifests changed.
 
 ## Checks performed
-70/70 unit tests pass (fixed snapshot, malformed answers, controlled timeout and connection failure for both clients).
-One live Claude request (`claude-opus-5-5`) on the labelled TESTSMA test data: proposal buy, valid, matched the SQLite
-decision row field for field; paper account untouched; key absent from DB, log and response. Backend stopped.
+82/82 unit tests pass. Browser SmokeTest (TESTSMA test data, provider test double): preview and cutoff correct, the
+test double received a decodable PNG identical to the stored capture, answers on screen = SQLite, 0 orders, unreadable
+image and mismatched capture rejected with recapture text. One live Claude image request: buy / up / sufficient,
+eligible, matched SQLite. All services stopped.
 
 ## Outstanding questions
-- The student needs to review and approve the Prompt 10 commit.
-- The student uses Claude only. Claude is now the default provider; OpenAI remains optional (`DECISIONS_PROVIDER=openai`),
-  unit-tested only (no live call).
+- The student needs to review and approve the Prompt 10A commit.
+- Replay-mode use of the panel and a live OpenAI request were not exercised.
 
 ## Next task
-Prompt 10A · Ask about chart (render a chart from a snapshot ID, capture it, submit it for analysis).
+Prompt 11 · Add agent review.

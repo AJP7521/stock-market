@@ -188,6 +188,37 @@ curl -X POST http://127.0.0.1:8000/api/decisions -H 'Content-Type: application/j
 `malformed_answer`, `timeout`, `provider_error`, `missing_input`. A live model can be asked about **test** market data;
 the response labels the market data source and the provider call separately.
 
+### Ask about chart (chart image + three questions)
+
+Below the chart, **Ask about chart** freezes a decision snapshot at the selected **completed** candle (the cutoff),
+renders that snapshot's candles, volume, SMA lines and configured indicator lines in a separate chart, captures it as a
+PNG with Lightweight Charts' `takeScreenshot`, and shows the captured image with its symbol, interval, cutoff and
+snapshot number. Live updates to the main chart do not change it. The PNG and snapshot ID go to `POST /api/decisions`,
+which checks that the PNG is readable and matches the snapshot, stores it beside the database
+(`captures/snapshot-<id>-<sha>.png`, served at `GET /api/decisions/{id}/image`), and asks three questions in one
+request: **action**, **crossover** (up / down / none / unreadable) and **evidence** (sufficient / insufficient).
+
+The panel shows what was sent, the three answers and the backend checks: the action against the long-only rules and
+the visual crossover against the crossover Python calculated. An unreadable chart, a missing answer, a conflicting
+crossover or insufficient evidence makes the decision **not eligible for automated execution**. An unreadable image or
+a capture of a different snapshot is rejected (HTTP 422) with what to recapture, and nothing is stored. No order is
+ever placed from this panel.
+
+To try it without a model call, start the backend with the labelled provider test double and the TESTSMA fixture
+(crossover up at 15:04 with SMA 2/3):
+
+```bash
+python3 -m backend.fixtures sma --db /tmp/ask-demo.sqlite
+```
+
+```bash
+MARKET_DB=/tmp/ask-demo.sqlite LIVE_FEED=off DECISIONS_PROVIDER=test python3 -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
+```
+
+Open `http://127.0.0.1:5173/?symbol=TESTSMA&interval=1m`, set the SMAs to 2 and 3, pick the 15:04 cutoff and click
+**Ask about chart**. The answers are marked **MOCK (provider test double)**. Leave out `DECISIONS_PROVIDER=test` to
+ask Claude.
+
 ### Configurable indicators
 
 The **Indicators** panel lists the indicator types Python provides (simple moving average, rolling price range). Give an
