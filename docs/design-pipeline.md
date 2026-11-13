@@ -45,7 +45,7 @@ How data is planned to move through the workstation, and which parts exist today
                                voice session (WebRTC, read-only summary)
 ```
 
-## What exists today (after Prompt 12)
+## What exists today (after Prompt 13)
 
 ```
 browser --GET /api/history--> Vite :5173 --proxy /api--> FastAPI :8000 --> backend/history.py
@@ -99,6 +99,8 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | Paper automation: start/stop (generation), runs deduplicated per account/strategy/symbol/interval/candle, apply only eligible approved decisions, pre-fill rechecks, trace | `backend/automation.py`, `/api/automation/*` | exists |
 | Orders and fills linked to a decision (`decision_id`, one order per decision), FILL_CHECKS / ORDER_DECIDED hooks inside the fill transaction | `backend/paper.py` | exists |
 | Automation panel: Start/Stop, polling for completed candles, off-screen render + capture, runs table, decision trace | `frontend/src/AutomationPanel.vue`, `App.vue` | exists |
+| Voice about one decision: read-only record from SQLite, Claude replies with session history, sessions/turns stored; `GET /api/decisions`, `/api/voice/sessions*` | `backend/voice.py`, `backend/app.py` | exists |
+| Voice panel: decision picker, microphone (getUserMedia) indicator, Web Speech recognition + synthesis, End releases the microphone | `frontend/src/VoicePanel.vue` | exists |
 | Voice | – | planned (Prompt 13) |
 | SmokeTest command | – | planned (Prompt 14) |
 
@@ -298,4 +300,23 @@ next observation (live feed or TEST feed) -> paper.process_observation, per pend
     + ORDER_DECIDED (run "filled") ; or rejection reason (run "rejected")
 Stop -> POST /api/automation/stop: enabled = 0; pending automation orders rejected
 GET /api/automation/trace/{decision_id}: crossover -> proposal -> review -> final check -> order/fill -> account
+```
+
+## Voice path (Prompt 13)
+
+```
+VoicePanel: choose decision -> Start voice
+  getUserMedia(audio)  (denied -> message, nothing to release)        "● Microphone active"
+  POST /api/voice/sessions {decision_id}  -> voice.record(): READ-ONLY summary from SQLite
+       snapshot (crossover, SMAs, account) + analyst + reviewer + final check
+       + automation run / order / fill / P&L / account now, or "no simulated trade" and why
+       -> voice_sessions row (summary_text frozen for the session)        (failure -> release mic)
+  loop: SpeechRecognition (browser; Chrome uses Google's speech service) -> final text
+        POST /api/voice/sessions/{id}/turns {text}
+             -> Claude messages (system = instructions + summary; messages = earlier turns + question;
+                no tools, no database access) -> reply text; voice_turns rows (user, assistant)
+        speechSynthesis.speak(reply) -> listen again (follow-up in the same session)
+  End voice / error: recognition.abort, speechSynthesis.cancel, every track.stop() (microphone released),
+        POST /api/voice/sessions/{id}/end
+Deviation from the prompt: no WebRTC audio stream to a model (the Claude API has no audio).
 ```

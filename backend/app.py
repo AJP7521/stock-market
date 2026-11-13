@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from backend.candles import iso_ms
 from backend import automation  # noqa: E402  (also registers the simulator's pre-fill checks)
+from backend import voice  # noqa: E402
 from backend.chart_images import ImageRejected, stored_path
 from backend.decisions import create_snapshot, decide, get_decision, load_snapshot, make_provider
 from backend.indicator_store import add_config, delete_config, list_configs
@@ -465,6 +466,16 @@ def create_decision(body: DecisionIn) -> dict:
         conn.close()
 
 
+@app.get("/api/decisions")
+def list_decisions(limit: int = Query(30, ge=1, le=200)) -> dict:
+    """Recent decisions with their outcome, newest first (for choosing one to discuss)."""
+    conn = _paper_conn()
+    try:
+        return {"decisions": voice.recent_decisions(conn, limit)}
+    finally:
+        conn.close()
+
+
 @app.get("/api/decisions/{decision_id}")
 def read_decision(decision_id: int) -> dict:
     conn = _paper_conn()
@@ -622,3 +633,63 @@ def automation_trace(decision_id: int) -> dict:
         raise HTTPException(404, str(exc)) from None
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------- voice about one decision (Prompt 13)
+
+class VoiceSessionIn(BaseModel):
+    decision_id: int
+
+
+@app.post("/api/voice/sessions", status_code=201)
+def voice_start(body: VoiceSessionIn) -> dict:
+    """Start a voice session about one decision; the model only ever sees this read-only summary."""
+    conn = _paper_conn()
+    try:
+        return voice.start_session(conn, body.decision_id, voice.make_voice_provider())
+    except voice.VoiceError as exc:
+        raise HTTPException(404, str(exc)) from None
+    finally:
+        conn.close()
+
+
+class VoiceTurnIn(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)   # what the browser's speech recognition heard
+
+
+@app.post("/api/voice/sessions/{session_id}/turns")
+def voice_turn(session_id: int, body: VoiceTurnIn) -> dict:
+    conn = _paper_conn()
+    try:
+        return voice.ask(conn, session_id, body.text, voice.make_voice_provider())
+    except voice.VoiceError as exc:
+        raise HTTPException(409, str(exc)) from None
+    finally:
+        conn.close()
+
+
+class VoiceEndIn(BaseModel):
+    reason: str = "ended by the student"
+
+
+@app.post("/api/voice/sessions/{session_id}/end")
+def voice_end(session_id: int, body: VoiceEndIn) -> dict:
+    conn = _paper_conn()
+    try:
+        return voice.end_session(conn, session_id, body.reason)
+    except voice.VoiceError as exc:
+        raise HTTPException(404, str(exc)) from None
+    finally:
+        conn.close()
+
+
+@app.get("/api/voice/sessions/{session_id}")
+def voice_read(session_id: int) -> dict:
+    conn = _paper_conn()
+    try:
+        s = voice.get_session(conn, session_id)
+    finally:
+        conn.close()
+    if s is None:
+        raise HTTPException(404, f"no voice session {session_id}")
+    return s

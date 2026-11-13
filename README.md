@@ -30,6 +30,7 @@ No real money or brokerage account is involved at any stage.
 | Frontend | Vue 3.5.45, built with Vite 8.3.7 and @vitejs/plugin-vue 6.0.10 | installed (`frontend/package.json`, lockfile) |
 | Charting | TradingView Lightweight Charts 5.2.1 | installed (`frontend/package.json`, lockfile) |
 | Market data | yfinance 1.8.0 `AsyncWebSocket` (websockets 17.4, protobuf 7.36.2) | installed (`backend/requirements.txt`) |
+| Speech | Browser Web Speech API (`SpeechRecognition`, `speechSynthesis`) in Google Chrome; no package | built in (Prompt 13) |
 | AI provider | Claude API via `anthropic` 2.8.0 (model `claude-opus-5-5`), the default; optionally OpenAI `POST /v1/decisions` (standard library) with `DECISIONS_PROVIDER=openai`; key in the ignored `.env` | installed (`backend/requirements.txt`) |
 
 ## Prerequisites found on this computer (2026-11-10)
@@ -187,6 +188,21 @@ curl -X POST http://127.0.0.1:8000/api/decisions -H 'Content-Type: application/j
 `GET /api/decisions/{id}` and `GET /api/decisions/snapshots/{id}` read them back. Statuses: `decided`,
 `malformed_answer`, `timeout`, `provider_error`, `missing_input`. A live model can be asked about **test** market data;
 the response labels the market data source and the provider call separately.
+
+### Talk about a decision (voice)
+
+The **Talk about a decision (voice)** panel lists recent decisions. Choose one and press **Start voice**: the browser
+asks for the microphone ("● Microphone active" while it is open), you ask a question aloud, and the answer is read
+back; ask follow-ups in the same session. **End voice** (or a denied microphone, a lost backend or a speech error)
+stops recognition and speech, releases the microphone and ends the session.
+
+The Claude API has no audio, so speech stays in the browser (Web Speech API): `SpeechRecognition` turns speech into
+text and `speechSynthesis` reads the reply. **Use Google Chrome**; Chrome sends the audio to Google's speech service.
+This differs from the prompt's WebRTC design (no audio is streamed to the model; each turn is speech → text → Claude →
+speech). FastAPI builds a read-only summary of the decision from SQLite (snapshot, analyst, reviewer, final check,
+paper order, fill, P&L, account) and Claude answers only from it, naming the missing evidence when a question goes
+beyond it. Sessions and every turn are stored in `voice_sessions` and `voice_turns`. `DECISIONS_PROVIDER=test`
+replaces Claude with a labelled test double. A text box lets you type a question during a session.
 
 ### Paper automation (reviewed decisions → paper account)
 

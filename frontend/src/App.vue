@@ -5,6 +5,7 @@ import AutomationPanel from './AutomationPanel.vue'
 import CandleChart from './CandleChart.vue'
 import IndicatorPanel from './IndicatorPanel.vue'
 import PaperPanel from './PaperPanel.vue'
+import VoicePanel from './VoicePanel.vue'
 
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '1d']
 
@@ -456,6 +457,8 @@ onBeforeUnmount(() => {
 
     <AutomationPanel v-if="mode === 'live' && symbol && symbol !== 'SAMPLE'" :symbol="symbol" :timeframe="timeframe"
                      :sma-short="smaShort" :sma-long="smaLong" />
+
+    <VoicePanel />
 
     <IndicatorPanel :symbol="mode === 'replay' ? (replaySymbol.trim().toUpperCase() || symbol) : symbol"
                     @changed="indicatorsChanged" />

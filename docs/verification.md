@@ -760,3 +760,72 @@ All provider responses in this prompt were **mocked** (test double); no live mod
 
 **Not exercised in the browser:** Stop while a model reply is pending (unit test only), a decision too old at fill
 (unit test only), automation on live Yahoo data, sell/close fills by automation.
+
+---
+
+## Prompt 13 · Discuss a recorded decision by voice (2026-11-13)
+
+### CHECK and the provider decision
+- The prompt specifies OpenAI GPT-Live over WebRTC. The student uses Claude only. The Claude features overview
+  (`platform.claude.com/docs/en/build-with-claude/overview.md`, fetched 2026-11-13) lists no audio input/output or
+  realtime/WebRTC feature. The student chose **Claude + the browser's speech** (Web Speech API).
+- No package was installed: `anthropic` 2.8.0 is already present; `SpeechRecognition`, `speechSynthesis`,
+  `getUserMedia` are built into Chrome. No manifest changed.
+- **Deviations recorded:** no audio is streamed to a model over WebRTC; each turn is speech → text (browser) →
+  Claude → speech (browser). Chrome's speech recognition sends the audio to Google's speech service. Safari support
+  is partial, Firefox has none; the panel says so when recognition is missing.
+
+### Unit tests (**test data**, **voice test double**, no audio)
+`python3 -m unittest discover -s backend/tests -t .` → **110 tests, OK** (8 new in `test_voice.py`):
+- Record of a filled automation decision contains crossover up, proposal buy, verdict accept, "mocked test double",
+  TEST, "Fill: 1 share(s) at 20.0", cash after $980.00, position 1, final check eligible, account now.
+- Vetoed decision: "No paper order was placed for this decision, so no simulated trade happened." and the failed gate.
+- Manual (Ask about chart) decision: "manual question … no simulated trade happened", no reviewer.
+- Two questions in one session: the second call's history is user/assistant/user with the same frozen summary;
+  4 turns stored; asking after End is refused; orders, fills, decisions and P&L rows unchanged (read-only).
+- A failed reply is stored and left out of the next call's history. The instructions require naming missing evidence.
+- No API key → error; unknown decision → error.
+
+### Browser checks in the built-in browser (**MOCKED** microphone, speech recognition and speech output)
+DB: a copy of the Prompt 12 SmokeTest DB (decision 3: buy, accept, filled at 21 → $979 / 1 share; decision 5: close,
+reject_unsupported_signal, skipped). Backend `DECISIONS_PROVIDER=test` (voice test double), `LIVE_FEED=off`.
+| Check | Mocks | Expected | Observed | Result |
+|---|---|---|---|---|
+| Flow, decision 3 | fake mic stream (AudioContext), fake SpeechRecognition "hearing" the two questions, stubbed `speak` | mic shown active, two replies in one session, End releases the mic | "● Microphone active"; both replies spoken (second reply "turns so far 3"); after End: "Microphone off (released)", track `ended`; session 1 ended, 4 turns, call_kind mock | pass |
+| Denied microphone | `getUserMedia` rejects `NotAllowedError` | message, no session, nothing held | "Microphone access was denied. Allow the microphone for this page and press Start voice again."; idle; no new session | pass |
+| Failed connection | fake mic granted; backend stopped | mic released, message | "Could not start the voice session (backend unreachable or rejected): HTTP 502"; "Microphone off (released)", track `ended` | pass |
+
+### Live session (**live Claude**, real microphone and speaker, the student's Google Chrome on localhost)
+Backend with Claude (`anthropic`, `claude-opus-5-5`, live) on the same DB. The agent decisions in this record were made
+by the **test double** on **test prices**; Claude only described them. Transcripts from `voice_turns`; the reply text
+is exactly what `speechSynthesis` read aloud.
+
+**Decision 3** (record: up crossover; analyst buy; reviewer accept; eligible; order 1 filled at 21; $979, 1 share).
+- Session 2: recognition heard noise ("nope something oh to who"); reply: "Sorry, I didn't catch that question. …
+  Could you ask again?" The student ended the session and started session 3.
+- Session 3, Q "what did the agents decide for the symbol" → "For TESTAUTO, which used test data, the analyst agent
+  proposed a buy because the short moving average had crossed above the long one, and the reviewer agent accepted
+  that proposal. Python then confirmed it was eligible, and the paper account bought one share at twenty-one dollars,
+  leaving nine hundred seventy-nine dollars in cash." (2743 ms) — **matches** the record.
+- Q "what happened to the paper account" → "… the paper account started with one thousand dollars and no shares, then
+  a paper order for one TESTAUTO share filled at twenty-one dollars, the next observed price rather than the
+  nineteen-dollar candle close. That left nine hundred seventy-nine dollars in cash and one share, with realized and
+  total profit and loss both at zero right after the fill." (2796 ms) — **matches** (P&L fill row: realized 0, total 0).
+
+**Decision 5** (record: down crossover, SMA2 13 < SMA3 15; analyst close; reviewer reject_unsupported_signal; no order).
+- Q "what do the agents decide for this symbol" → "On this test data, the analyst agent proposed closing the one share
+  of TESTAUTO because the short average of thirteen had crossed below the long average of fifteen. The reviewer agent
+  rejected that as an unsupported signal, so Python's final check failed for lack of reviewer acceptance. No paper
+  order was placed, and the account still holds one share with nine hundred seventy-nine dollars in cash." — **matches**;
+  the student reported hearing this text.
+- Q "what happened to the paper account" → "Nothing changed in the paper account because of this decision, since no
+  paper order was placed and no simulated trade happened. The account still shows nine hundred seventy-nine dollars in
+  cash and one share of TESTAUTO. It has one fill in total, but the record says that count can include other
+  decisions, so it isn't from this one." — **accurately describes the no-trade outcome**; the student reported hearing it.
+
+All four live sessions ended with "ended by the student" (End voice). No errors in the backend log; the key does not
+appear in the DB or logs. Services stopped.
+
+**Not confirmed / not exercised:** the student's report of Chrome's microphone indicator after End (release was
+verified with the mocked track state); a real permission denial in Chrome (mocked only); the speech-recognition
+`network` error path.
