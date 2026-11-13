@@ -2,8 +2,11 @@
 // TradingView Lightweight Charts expects. Prices and volume are not recalculated
 // here; the backend supplies the numbers.
 
-const UP = '#26a69a'
-const DOWN = '#ef5350'
+const UP = '#0f8a5f'
+const DOWN = '#d8273a'
+// Volume bars use the same hues, lighter, so they sit behind the candles visually.
+const UP_VOLUME = 'rgba(15, 138, 95, 0.28)'
+const DOWN_VOLUME = 'rgba(216, 39, 58, 0.28)'
 const SHORT = '#2962ff'
 const LONG = '#ff9800'
 
@@ -31,7 +34,7 @@ export function toBars(row) {
   const candle = { time, open: row.open, high: row.high, low: row.low, close: row.close }
   const volume = row.volume === null || row.volume === undefined
     ? { time }
-    : { time, value: row.volume, color: row.close >= row.open ? UP : DOWN }
+    : { time, value: row.volume, color: row.close >= row.open ? UP_VOLUME : DOWN_VOLUME }
   return { candle, volume }
 }
 

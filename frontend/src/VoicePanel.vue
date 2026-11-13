@@ -160,7 +160,7 @@ onBeforeUnmount(() => stop('page closed'))
 </script>
 
 <template>
-  <section class="voice" data-testid="voice">
+  <section class="voice card" data-testid="voice">
     <h2>Talk about a decision (voice)</h2>
     <div class="controls">
       <label>Decision
@@ -208,14 +208,12 @@ onBeforeUnmount(() => stop('page closed'))
 </template>
 
 <style scoped>
-.voice { max-width: 1100px; margin: 1rem 0; padding: 0.75rem; border: 1px solid #ddd; font-family: system-ui, sans-serif; }
-h2 { font-size: 1.1rem; margin: 0 0 0.5rem; }
 .controls { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin: 0.25rem 0; }
 .hint { font-size: 0.8rem; color: #666; }
 .mic { color: #c62828; }
 .turns { font-size: 0.9rem; }
 .turns li { margin: 0.3rem 0; }
-pre { font-size: 0.75rem; white-space: pre-wrap; background: #f7f7f7; padding: 0.5rem; }
+pre { font-size: 0.75rem; white-space: pre-wrap; background: #f6f7f8; padding: 0.6rem; border-radius: 8px; }
 .bad { color: #c62828; }
 .warn { color: #b26b00; }
 </style>

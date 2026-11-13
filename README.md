@@ -77,7 +77,7 @@ stock-market/
 |   |-- package.json          npm manifest (package-lock.json pins exact versions)
 |   |-- vite.config.js        Dev server on 5173, forwards /api to 127.0.0.1:8000
 |   |-- index.html
-|   `-- src/                  main.js, App.vue, CandleChart.vue, IndicatorPanel.vue, PaperPanel.vue, chartAdapter.js
+|   `-- src/                  main.js, style.css, App.vue, CandleChart.vue, the panels (*Panel.vue), chartAdapter.js
 |-- docs/
 |   |-- design-pipeline.md    File responsibilities and how data moves
 |   `-- verification.md       Repeatable checks and observed results
@@ -116,7 +116,7 @@ cd frontend && npm run dev
 ```
 
 Open http://127.0.0.1:5173/. The page opens on **AAPL, 1-minute**, streaming live from Yahoo Finance during market
-hours. Every update is recorded in `backend/data/market.sqlite`. Use the Interval menu (1m, 5m, 15m, 1h, 1d) to
+hours. Every update is recorded in `backend/data/market.sqlite`. Use the interval tabs above the chart (1m, 5m, 15m, 1h, 1d) to
 switch timeframes, or enter `SAMPLE` and press Load to see the synthetic CSV. The status bar shows the source, the age
 of the latest source observation, the feed state, the browser's own connection to FastAPI, and whether the latest
 candle is still forming. Hover over a candle to see its date, time (UTC), prices and volume.

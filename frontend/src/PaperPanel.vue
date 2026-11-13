@@ -61,7 +61,7 @@ onBeforeUnmount(() => clearInterval(timer))
 </script>
 
 <template>
-  <section class="paper" data-testid="paper-panel">
+  <section class="paper card" data-testid="paper-panel">
     <header>
       <strong>Paper account</strong>
       <span>Cash <b data-testid="paper-cash">{{ money(account?.cash) }}</b></span>
@@ -129,7 +129,9 @@ onBeforeUnmount(() => clearInterval(timer))
 </template>
 
 <style scoped>
-.paper { margin: 0.75rem 0; padding: 0.5rem 0.75rem; border: 1px solid #ddd; max-width: 880px; font-size: 0.9rem; }
+.paper { font-size: 0.9rem; }
+header strong { font-size: 1.05rem; flex-basis: 100%; }
+header b { font-size: 1.05rem; }
 header, .controls { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; }
 .controls { margin-top: 0.4rem; }
 .hint { font-size: 0.8rem; color: #666; }
@@ -137,9 +139,9 @@ header, .controls { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-item
 .bad, .rejected { color: #c62828; }
 .filled { color: #1b7f5a; }
 .pending { color: #b26b00; }
-table { border-collapse: collapse; margin-top: 0.5rem; font-variant-numeric: tabular-nums; font-size: 0.8rem; }
-th, td { border: 1px solid #ddd; padding: 0.15rem 0.4rem; text-align: right; }
-td.reason { text-align: left; max-width: 16rem; }
+table { margin-top: 0.5rem; }
+th, td { text-align: right; padding: 5px 8px; }
+td.reason { text-align: left; white-space: normal; min-width: 10rem; }
 h3 { font-size: 0.95rem; margin: 0.8rem 0 0.2rem; }
-tr.valuation td { background: #f7f9ff; }
+tr.valuation td { background: #f7f9fc; }
 </style>

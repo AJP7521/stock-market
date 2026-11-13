@@ -61,6 +61,7 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | Sample one-minute candles | `prompts/data/sample-candles.csv` | exists (3 synthetic rows) |
 | FastAPI app, `GET /api/health` | `backend/app.py` | exists |
 | Vue app showing backend health | `frontend/src/App.vue`, `src/main.js`, `index.html` | exists |
+| Page layout and shared styles (top bar with symbol search, mode switch and health; status strip; quote header with last close and change; chart card; right column with paper account and voice) | `frontend/src/style.css`, `App.vue` | exists (Prompt 15; presentation only, no data flow change) |
 | `/api` proxy (HTTP; `ws: true` ready for WebSockets) | `frontend/vite.config.js` | exists |
 | CSV loader (`csv` module; six fields; sorted by UTC minute start) | `backend/history.py` | exists |
 | `GET /api/history?symbol=&timeframe=&as_of=` returns `{candles: [six fields], status: [...]}`; SAMPLE = CSV, other symbols = SQLite observations | `backend/app.py` | exists |
@@ -73,7 +74,7 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | NYSE regular-session calendar (holidays, early closes, DST) | `backend/market_calendar.py` | exists |
 | Live feed inside FastAPI (yfinance subscribe, own receive loop, records to SQLite, feed status) | `backend/live.py` | exists |
 | WebSocket `/api/ws/candles?symbol&timeframe` (candle + feed messages) | `backend/app.py` | exists |
-| Timeframe selector, live status bar, in-place candle updates | `frontend/src/App.vue`, `CandleChart.vue` | exists |
+| Timeframe tabs, live status bar, in-place candle updates | `frontend/src/App.vue`, `CandleChart.vue` | exists |
 | Read-only replay (receipt order, as-of each arrival) + `/api/replay`, `/api/replay/sessions` | `backend/replay.py`, `backend/app.py` | exists |
 | Replay mode in the dashboard (Replay label, step, replay clock, source time, flags) | `frontend/src/App.vue` | exists |
 | `LIVE_FEED=off` switch (no Yahoo connection) | `backend/app.py` | exists |

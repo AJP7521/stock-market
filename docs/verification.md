@@ -957,3 +957,31 @@ The student asked to check the build against three requirements. Evidence found 
 The live Yahoo path (Prompt 8) was demonstrated on 2026-11-10, before Prompts 9–14. Re-run it during the regular
 session (9:30–16:00 ET): follow one AAPL observation from Yahoo through SQLite to the chart, and check the feed status
 and age while connected and while disconnected. At the time of this audit (≈ 23:15 ET) the market was closed.
+
+## Prompt 15 · Clean up the workstation UI (2026-11-12)
+
+Presentation only (`frontend/src`): new `style.css`, a new page layout in `App.vue`, card styling in the panels,
+chart colours and grid in `CandleChart.vue` / `chartAdapter.js`. No backend, API, database or dependency change.
+The reference screenshot was used for style only; the page keeps its own name and no third-party branding.
+
+### What changed on screen
+- Top bar: "Market Workstation" wordmark, rounded symbol search with a green **Load** button, a Live / Replay switch,
+  and the backend health dot with **Check again**.
+- Status strip (mode, symbol, interval, source, observation age, feed, socket, latest candle) under the top bar.
+- Quote header: symbol, last close in large type and its change since the first loaded candle's open, coloured green
+  or red, with the candle times in UTC and a **Simulated paper trading** badge.
+- Chart card: interval tabs (1m … 1d) replace the Interval `<select>` (test ID `timeframe-select` → `timeframe-tabs`,
+  `timeframe-<tf>`; not used by the SmokeTest), SMA controls on the right, white chart with only light horizontal grid
+  lines, green/red candles and lighter volume bars. The captured PNG keeps a solid white background.
+- Right column (≥ 1100 px wide): Paper account and Voice. Indicators, values table, Ask about chart and Paper
+  automation stay in the main column. One column on narrower screens; tables scroll sideways inside their card.
+
+### Checks
+| Check | Command / action | Expected | Observed |
+|---|---|---|---|
+| Build | `cd frontend && npm run build` | builds without errors | built (CSS 10.95 kB, JS 304.38 kB) |
+| Desktop view | built-in browser, 1440 × 1000, `?symbol=SAMPLE&interval=1m` (**synthetic CSV**) | two columns, quote 104.00 +4.00 (+4.00%) in green, chart card, account and voice cards | as expected |
+| Phone view | built-in browser, ≈ 360 px wide, same page | one column, no sideways page scroll | as expected; top bar wraps and is not sticky below 640 px |
+| SmokeTest | `python3 -m backend.smoke` (**test data**, provider test double) | PASS 48/48 | **PASS 48/48** (`smoke-20261112-233100`); services and browser stopped |
+
+Not checked: the live AAPL view during market hours with the new layout.

@@ -77,7 +77,7 @@ onMounted(async () => { await loadTypes(); await loadConfigs() })
 </script>
 
 <template>
-  <section class="indicators" data-testid="indicator-panel">
+  <section class="indicators card" data-testid="indicator-panel">
     <form class="add" data-testid="indicator-form" @submit.prevent="add">
       <strong>Indicators for {{ symbol }}</strong>
       <label>
@@ -109,8 +109,8 @@ onMounted(async () => { await loadTypes(); await loadConfigs() })
 </template>
 
 <style scoped>
-.indicators { margin: 0.5rem 0; padding: 0.5rem 0.75rem; border: 1px solid #ddd; max-width: 880px; }
-.add { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+.add { display: flex; flex-wrap: wrap; gap: 0.6rem 0.9rem; align-items: center; }
+.add strong { font-size: 1.05rem; flex-basis: 100%; }
 .hint { font-size: 0.8rem; color: #666; margin: 0.3rem 0; }
 .bad { color: #c62828; margin: 0.3rem 0; }
 ul { margin: 0.3rem 0 0; padding-left: 1.2rem; }

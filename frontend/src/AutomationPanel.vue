@@ -133,7 +133,7 @@ watch(params, () => { attempted.clear(); trace.value = null; refresh() })
 </script>
 
 <template>
-  <section class="auto" data-testid="automation">
+  <section class="auto card" data-testid="automation">
     <h2>Paper automation (analyst + reviewer → paper account)</h2>
     <div class="controls">
       <label>Order size
@@ -231,15 +231,12 @@ watch(params, () => { attempted.clear(); trace.value = null; refresh() })
 </template>
 
 <style scoped>
-.auto { max-width: 1100px; margin: 1rem 0; padding: 0.75rem; border: 1px solid #ddd; font-family: system-ui, sans-serif; }
-h2 { font-size: 1.1rem; margin: 0 0 0.5rem; }
-h3 { font-size: 0.95rem; margin: 0.75rem 0 0.25rem; }
 .controls { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
 .hint { font-size: 0.8rem; color: #666; }
 .acct { font-size: 0.9rem; }
 .offscreen { position: absolute; left: -10000px; top: 0; width: 800px; }
-.runs { border-collapse: collapse; font-size: 0.82rem; margin-top: 0.5rem; }
-.runs th, .runs td { border: 1px solid #ddd; padding: 0.2rem 0.45rem; text-align: left; vertical-align: top; }
+.runs { margin-top: 0.5rem; }
+.runs th, .runs td { text-align: left; vertical-align: top; }
 .trace ol { font-size: 0.85rem; padding-left: 1.25rem; }
 .trace li { margin: 0.25rem 0; }
 .ok { color: #1b7f5a; }

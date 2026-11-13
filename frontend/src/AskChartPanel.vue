@@ -134,7 +134,7 @@ const strategy = computed(() => decision.value?.request_sent?.input?.[0]?.conten
 </script>
 
 <template>
-  <section class="ask" data-testid="ask-chart">
+  <section class="ask card" data-testid="ask-chart">
     <h2>Ask about chart (analyst + reviewer)</h2>
     <form class="controls" @submit.prevent="ask">
       <label>
@@ -255,20 +255,18 @@ const strategy = computed(() => decision.value?.request_sent?.input?.[0]?.conten
 </template>
 
 <style scoped>
-.ask { max-width: 900px; margin: 1rem 0; padding: 0.75rem; border: 1px solid #ddd; font-family: system-ui, sans-serif; }
-h2 { font-size: 1.1rem; margin: 0 0 0.5rem; }
-h3 { font-size: 0.95rem; margin: 0.75rem 0 0.25rem; }
 .controls { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
 .hint { font-size: 0.8rem; color: #666; }
 .offscreen { position: absolute; left: -10000px; top: 0; width: 800px; }
 .capture { margin: 0.75rem 0; }
-.capture img { max-width: 100%; border: 1px solid #ccc; display: block; }
+.capture img { max-width: 100%; border: 1px solid #e3e6e8; border-radius: 8px; display: block; }
 .capture figcaption { font-size: 0.85rem; margin-top: 0.3rem; }
-.answers { border-collapse: collapse; font-size: 0.85rem; margin-top: 0.5rem; }
+.answers { margin-top: 0.5rem; }
 .answers caption { text-align: left; font-size: 0.8rem; color: #666; }
-.answers th, .answers td { border: 1px solid #ddd; padding: 0.25rem 0.5rem; text-align: left; vertical-align: top; }
-pre { font-size: 0.75rem; max-height: 16rem; overflow: auto; background: #f7f7f7; padding: 0.5rem; }
-.notice { padding: 0.5rem 0.75rem; margin: 0.5rem 0; }
+.answers th, .answers td { text-align: left; vertical-align: top; }
+.answers td { min-width: 6rem; }
+pre { font-size: 0.75rem; max-height: 16rem; overflow: auto; background: #f6f7f8; padding: 0.6rem; border-radius: 8px; }
+.notice { padding: 0.6rem 0.8rem; margin: 0.5rem 0; border-radius: 10px; }
 .bad-box { background: #fdecea; border: 1px solid #f5c2c0; }
 .ok { color: #1b7f5a; }
 .bad { color: #c62828; }

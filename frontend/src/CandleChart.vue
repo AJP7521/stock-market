@@ -127,8 +127,15 @@ onMounted(() => {
   chart = createChart(container.value, {
     ...(props.fixedSize ? { autoSize: false, width: props.fixedSize.width, height: props.fixedSize.height }
                         : { autoSize: true }),
-    layout: { attributionLogo: true },
-    timeScale: { timeVisible: true, secondsVisible: false },
+    layout: {
+      attributionLogo: true,
+      background: { color: '#ffffff' },   // solid white so the captured PNG has no transparency
+      textColor: '#5b636a',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
+    },
+    grid: { vertLines: { visible: false }, horzLines: { color: '#eef0f2' } },
+    rightPriceScale: { borderVisible: false },
+    timeScale: { timeVisible: true, secondsVisible: false, borderVisible: false },
     crosshair: { mode: 0 }, // normal: the crosshair follows the pointer
   })
   candleSeries = chart.addSeries(CandlestickSeries, {
@@ -202,13 +209,15 @@ onBeforeUnmount(() => chart?.remove())
 </template>
 
 <style scoped>
-.chart-card { max-width: 900px; font-family: system-ui, sans-serif; }
-header { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: baseline; margin-bottom: 0.5rem; }
-.legend { display: flex; flex-wrap: wrap; gap: 0.4rem; font-variant-numeric: tabular-nums; }
-.chart { height: 400px; border: 1px solid #ddd; }
-.sma-short { color: #2962ff; }
-.sma-long { color: #ff9800; }
-.up { color: #1b7f5a; }
-.down { color: #c62828; }
-footer { font-size: 0.8rem; color: #555; margin-top: 0.4rem; }
+.chart-card { min-width: 0; }
+header { display: flex; flex-wrap: wrap; gap: 0.4rem 0.9rem; align-items: baseline; margin-bottom: 0.6rem; font-size: 0.85rem; }
+header > strong { font-size: 0.9rem; }
+.legend { display: flex; flex-wrap: wrap; gap: 0.3rem 0.6rem; color: #5b636a; font-variant-numeric: tabular-nums; }
+.legend b { color: #1d2228; font-weight: 600; }
+.chart { height: 440px; }
+.sma-short, .sma-short b { color: #2962ff; }
+.sma-long, .sma-long b { color: #ff9800; }
+.up { color: #0f8a5f; }
+.down { color: #d8273a; }
+footer { font-size: 0.75rem; color: #8a9196; margin-top: 0.5rem; }
 </style>
