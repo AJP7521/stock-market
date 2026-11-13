@@ -374,7 +374,24 @@ python3 -m backend.recorder show --ticker AAPL
 ```
 
 `observations` holds one row per distinct message, and `receipts` logs every arrival, including exact repeats.
-Count `observations` to avoid counting a repeat twice.
+Count `observations` to avoid counting a repeat twice. Every table in the database (market data, indicators, paper
+account and P&L, decisions, automation, voice) is described in `docs/design-pipeline.md`, section "SQLite schema".
+
+### Duplicates, revisions and out-of-order observations
+
+Each Yahoo message is stored as received, and nothing stored is ever updated or deleted.
+
+| Case | How it is stored | How candles and replay treat it | Tests |
+|---|---|---|---|
+| **Exact duplicate** (same ticker, identical decoded content) | no new observation (`UNIQUE (ticker, content_hash)`); a new `receipts` row with `is_repeat = 1`; `receipt_count` goes up | counted once; in replay the repeat is a step that changes nothing | `test_recorder` (repeat), `test_replay` (repeat step) |
+| **Changed message with the same source time** | a new observation; the earlier row is kept | both are used (Yahoo has no correction field and one-second times, so several trades can share a time) | `test_recorder` |
+| **Identified revision** (a caller passes `revises_id`) | a new observation pointing at the original; the original is unchanged | the revision replaces the original once the revision has been received | `test_recorder`, `test_candles` (correction), `test_replay` (revision at its arrival) |
+| **Out-of-order / late arrival** (received after newer observations) | `source_time_ms` (when it happened) and `receipts.seq` / `received_at_ms` (when it arrived) are kept separately | placed in its candle by source time; a candle already shown is recomputed; in replay it appears only from its arrival, so earlier steps are not rewritten | `test_recorder` (ordering), `test_candles` (late middle observation), `test_replay` (late arrival) |
+
+**Candle completeness** is not a stored flag: candles are recomputed from the stored observations for an as-of time
+("now" when live, the replay time in replay). A candle is complete once the as-of time reaches its end; because the
+inputs are preserved, the same as-of time always gives the same candles and the same complete/forming status. The
+status bar shows it for the latest candle, and `/api/history` returns it for every candle.
 
 Build one-minute candles from the stored observations (optionally as of a given UTC time):
 

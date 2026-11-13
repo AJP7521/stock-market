@@ -341,3 +341,52 @@ python3 -m backend.smoke
   report.md / report.json (+ failure.png, logs, DB on failure); close browser, kill process groups, remove temp DB
   exit 0 (all pass) or 1
 ```
+
+## SQLite schema
+
+One database file: `backend/data/market.sqlite` by default, or `MARKET_DB` / `--db`. Every module creates its own
+tables with `CREATE TABLE IF NOT EXISTS` when it first opens the database (`python3 -m backend.recorder init` creates the
+market tables up front); columns added in later prompts are added with `ALTER TABLE` if missing, so an older file keeps
+working. Times are epoch milliseconds UTC (`*_ms`); money is integer micro-dollars (`*_micros`, 1e-6 USD).
+WAL journal mode, foreign keys on.
+
+### Market data (Prompts 6–9)
+| Table | One row per | Key columns | Uniqueness | Written by |
+|---|---|---|---|---|
+| `observations` | distinct message content | `id` (first-arrival order), `ticker`, `source_time_ms` (Yahoo `time`), `price`, `day_volume`, `last_size`, `source` (`yahoo` / `test`), `content_hash`, `raw_json`, `revises_id`, `first_received_ms`, `receipt_count` | `UNIQUE (ticker, content_hash)` | `recorder.record()` |
+| `receipts` | message **arrival** | `seq` (receipt order), `observation_id`, `received_at_ms`, `is_repeat` | `seq` autoincrement | `recorder.record()` |
+
+Candles are **not stored**: they are recomputed from `observations` (and, for replay, `receipts`) for any as-of time,
+including whether each candle is complete. See the README section "Duplicates, revisions and out-of-order
+observations".
+
+### Indicators (Prompt 9B)
+| Table | One row per | Key columns | Uniqueness | Written by |
+|---|---|---|---|---|
+| `indicator_configs` | named indicator instance | `symbol`, `name`, `type` (`sma`, `price_range`), `settings` (validated JSON) | `UNIQUE (symbol, name)` | `indicator_store` |
+
+### Paper account and P&L (Prompts 9C–9D, 12)
+| Table | One row per | Key columns | Uniqueness | Written by |
+|---|---|---|---|---|
+| `paper_accounts` | account (`paper`, `paper-test`) | `starting_cash_micros`, `cash_micros` (≥ 0) | `id` | `paper.open_account`, fills |
+| `paper_positions` | account + symbol | `quantity` (≥ 0, long only) | `(account_id, symbol)` | fills |
+| `paper_orders` | order | `request_id`, `side` (buy/sell/close), `quantity`, `status` (pending/filled/rejected), `reason`, `origin` (manual/automation), `decision_id` | `UNIQUE request_id`; one order per `decision_id` (partial unique index) | `paper.execute`, fills, automation |
+| `paper_fills` | fill | `order_id`, `price_micros`, `observation_id` (the price used), `executed_ms`, `cash_after_micros`, `position_after`, `decision_id` | `UNIQUE order_id` | `paper.process_observation` (one transaction) |
+| `paper_cost_basis` | account + symbol | `basis_micros`, `realized_micros` (weighted average cost) | `(account_id, symbol)` | `pnl.record_fill` |
+| `pnl_history` | fill or valuation event | `event_key`, `event_type`, `price_micros`, `price_source`, `cash_micros`, `quantity`, `realized_micros`, `unrealized_micros`, `total_micros`, `valuation_status` | `UNIQUE event_key` | `pnl` |
+
+### Decisions and review (Prompts 10–11)
+| Table | One row per | Key columns | Uniqueness | Written by |
+|---|---|---|---|---|
+| `decision_snapshots` | frozen snapshot | `kind` (application/test), `symbol`, `interval`, `decision_ms`, `candle_ts`, `complete`, `snapshot_json` (candle, SMAs, crossover, account, chart section) | `id` | `decisions.create_snapshot` |
+| `decisions` | decision (analyst + reviewer) | `snapshot_id`, `provider`, `model`, `call_kind` (live/mock), `status`, `proposal`, `validation_*`, `eligible_for_order`, `explanation`, `request_json` / `response_json` (images as file references), `questions_json`, `answers_json`, `chart_checks_json`, `image_path` + `image_json` (sha256), `reviewer_status`, `verdict`, `reviewer_model`, `review_json`, `strategy_json`, `final_check_json` | `id` | `decisions.decide` |
+
+Chart captures are PNG files beside the database (`captures/snapshot-<id>-<sha>.png`, ignored by Git).
+
+### Automation and voice (Prompts 12–13)
+| Table | One row per | Key columns | Uniqueness | Written by |
+|---|---|---|---|---|
+| `automation_state` | strategy + symbol + interval | `account_id`, `short`, `long`, `order_size`, `enabled`, `generation`, `started_ms`, `stopped_ms` | `key` | `automation.start/stop` |
+| `automation_runs` | analysed candle | `account_id`, `strategy`, `symbol`, `interval`, `candle_ts`, `generation`, `status`, `reason`, `snapshot_id`, `decision_id`, `order_id`, `fill_id` | `UNIQUE (account_id, strategy, symbol, interval, candle_ts)` | `automation` |
+| `voice_sessions` | voice session | `decision_id`, `provider`, `model`, `call_kind`, `summary_text` (the read-only record), `ended_ms`, `end_reason` | `id` | `voice` |
+| `voice_turns` | spoken question or reply | `session_id`, `role`, `text`, `model`, `latency_ms`, `status` | `id` | `voice` |

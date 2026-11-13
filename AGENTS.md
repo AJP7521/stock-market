@@ -16,7 +16,8 @@
 7. Market data and trading are simulated. Label synthetic, test and recorded data
    as such wherever it is shown or stored. Keep live-provider and mocked
    observations separate in the documentation.
-8. Update `docs/design-pipeline.md` when a component is added or its data flow changes.
+8. Update `docs/design-pipeline.md` when a component is added or its data flow changes. Its "SQLite schema"
+   section lists every table; update it whenever a table or column is added or changed.
 9. At the end of a session, follow `handoffs/create-handoff.md`.
 
 ## Tools and packages: CHECK → TAKE ACTION → VERIFY

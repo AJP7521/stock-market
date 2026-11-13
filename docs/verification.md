@@ -903,8 +903,57 @@ All provider responses in the SmokeTest are **mocked**; all market data is **tes
 `.github/workflows/smoke.yml` (on push and manual dispatch): Python 3.14, Node 24, `pip install -r backend/requirements.txt
 -r backend/requirements-dev.txt`, `python -m playwright install --with-deps chromium`, `npm ci`, unit tests, then
 `python -m backend.smoke` with `SMOKE_BROWSER_CHANNEL=""` (Playwright's Chromium), uploading `test-results/`. No secrets.
-The YAML parses (1 job, 9 steps). **Not run yet:** the repository has no GitHub remote, and Playwright's own Chromium
-was not downloaded locally, so the CI browser path is untested.
+The YAML parses (1 job, 9 steps).
+
+**First CI run (2026-11-13):** the student approved pushing to the existing, empty, **public** repository
+`AJP7521/stock-market` (history checked first: `.env` never committed, no key-like strings). `git push -u origin main`
+(commit `8e6de54`) triggered run https://github.com/AJP7521/stock-market/actions/runs/43363805347 (04:10:49 →
+04:12:15 UTC): **success**, every step green. Unit tests: "Ran 110 tests"; SmokeTest with Playwright's Chromium on
+ubuntu-latest: "SmokeTest PASSED: 48/48 checks". No secrets were used.
 
 ### Separate live observations (not part of the SmokeTest)
 Live Yahoo data: Prompts 5–8. Live Claude image decision and review: Prompts 10A and 11. Voice: Prompt 13.
+
+---
+
+## Requirements audit: live visualization, persistence and replay, working evidence (2026-11-13)
+
+The student asked to check the build against three requirements. Evidence found (file or verification section):
+
+| Requirement | Evidence | Status |
+|---|---|---|
+| Yahoo Finance, updating candles + volume, WebSockets | `backend/live.py` (yfinance `AsyncWebSocket`), `WS /api/ws/candles`, Lightweight Charts candlestick + volume series updated in place (Prompt 8) | met |
+| Source, age and feed status visible | status bar: Source, Last source observation (s ago), Feed, Browser ↔ FastAPI, latest candle complete/forming | met |
+| Observations in SQLite, retrievable and replayable | `observations`, `receipts`; read-only Replay (Prompt 9) | met |
+| Identity, source and receipt times, revisions, candle completeness | `UNIQUE (ticker, content_hash)`, `source_time_ms`, `first_received_ms`, `receipts.received_at_ms`, `revises_id`; completeness recomputed for any as-of time (not a stored flag) | met; completeness now explained in the README |
+| Duplicates, revisions, out-of-order: explained and tested | rules were spread over `recorder.py`, design notes and one README line; tests covered replay and candles but not the recorder itself | **gap → fixed** |
+| Path live source → backend → chart + DB, incl. an unavailable feed | Prompt 8 live check (AAPL observation 67 from SQLite to the screen; paused, offline, reconnect) | met for requested pause / offline; **unrequested drop untested → fixed** (unit test with a fake upstream) |
+| README, agent instructions, design notes: data flow and SQLite schema | data flow documented; schema described only for `observations` / `receipts` | **gap → fixed** |
+| Database initialization and startup without credentials | README (`python3 -m backend.recorder init`, run commands), empty `.env.example`, no key in Git history | met |
+
+### Changes (docs and tests only; no application behaviour changed)
+- `docs/design-pipeline.md`: new **SQLite schema** section — all 16 tables (market data, indicators, paper and P&L,
+  decisions, automation, voice) with what one row is, key columns, uniqueness and the writing module.
+- `AGENTS.md` rule 8: keep that schema section current when a table or column changes.
+- `README.md`: new **Duplicates, revisions and out-of-order observations** section (storage, candle and replay treatment,
+  and the tests for each case) and an explanation of candle completeness; link to the schema section.
+- `backend/tests/test_recorder.py` (6 tests, **test data**): exact duplicate → one observation, two receipts
+  (`is_repeat` 0/1), `receipt_count` 2, counted once in the candle; same content for another ticker is separate; a
+  changed message with the same source time keeps both rows; an identified revision is a new row and the original row
+  is byte-for-byte unchanged, the candle high is 103 before the revision arrives and 102 after; an out-of-order arrival
+  keeps source and receipt order apart and the completed 15:00 candle is recomputed (open 105 → 100 once the late
+  15:00:10 observation is received); completeness is the same for the same as-of time.
+- `backend/tests/test_live_feed.py` (2 tests, **fake upstream socket**, no network): connecting → live → the network
+  drops ("ConnectionError: network lost") → disconnected → retry → Yahoo unreachable ("OSError: Yahoo unreachable") →
+  disconnected → retry → live; observations recorded before and after the outage (2 rows, source yahoo); `quiet` after
+  QUIET_AFTER_S without a message; a clean upstream close → "upstream closed the connection" → reconnect → live.
+  Stable over three repeated runs.
+
+### Checks
+- `python3 -m unittest discover -s backend/tests -t .` → **118 tests, OK** (8 new).
+- `python3 -m backend.smoke` → **PASS 48/48** (`smoke-20261112-231600`), services and browser stopped.
+
+### Still to do (needs market hours)
+The live Yahoo path (Prompt 8) was demonstrated on 2026-11-10, before Prompts 9–14. Re-run it during the regular
+session (9:30–16:00 ET): follow one AAPL observation from Yahoo through SQLite to the chart, and check the feed status
+and age while connected and while disconnected. At the time of this audit (≈ 23:15 ET) the market was closed.
