@@ -26,6 +26,7 @@ from backend import automation  # noqa: E402  (also registers the simulator's pr
 from backend import voice  # noqa: E402
 from backend.chart_images import ImageRejected, stored_path
 from backend.decisions import create_snapshot, decide, get_decision, load_snapshot, make_provider
+from backend.image_decisions import decide_image, get_image_decision, list_image_decisions
 from backend.indicator_store import add_config, delete_config, list_configs
 from backend.indicators import configured_values, describe_types, sma_crossover, validate_windows
 from backend.live import LiveHub
@@ -530,6 +531,63 @@ def read_decision_image(decision_id: int):
         conn.close()
     if path is None or not path.exists():
         raise HTTPException(404, f"decision {decision_id} has no stored chart image")
+    return FileResponse(path, media_type="image/png")
+
+
+# ---------------------------------------------------------------- image-only chart decision (Prompt 16)
+
+class ImageDecisionIn(BaseModel):
+    snapshot_id: int                  # the frozen snapshot the chart was rendered from
+    image_png: str                    # data:image/png;base64,... captured in the browser
+    capture: dict | None = None       # what the browser captured: snapshot_id, symbol, interval, cutoff
+
+
+@app.post("/api/image-decisions", status_code=201)
+def create_image_decision(body: ImageDecisionIn) -> dict:
+    """Send ONLY the chart PNG to the model and store its stance (long, short or wait). No trade is placed."""
+    conn = _paper_conn()
+    try:
+        return decide_image(conn, body.snapshot_id, make_provider(), body.image_png, body.capture)
+    except ImageRejected as exc:      # nothing stored, no provider call
+        raise HTTPException(422, {"problem": exc.problem, "recapture": exc.recapture}) from None
+    finally:
+        conn.close()
+
+
+@app.get("/api/image-decisions")
+def read_image_decisions(symbol: str = Query(min_length=1, max_length=20), timeframe: Timeframe = "1m",
+                         limit: int = Query(200, ge=1, le=1000)) -> dict:
+    """The latest decided stance per candle for one chart (for the chart markers), newest first."""
+    conn = _paper_conn()
+    try:
+        return {"image_decisions": list_image_decisions(conn, symbol.upper(), timeframe, limit)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/image-decisions/{image_decision_id}")
+def read_image_decision(image_decision_id: int) -> dict:
+    conn = _paper_conn()
+    try:
+        d = get_image_decision(conn, image_decision_id)
+    finally:
+        conn.close()
+    if d is None:
+        raise HTTPException(404, f"no image decision {image_decision_id}")
+    return d
+
+
+@app.get("/api/image-decisions/{image_decision_id}/image")
+def read_image_decision_png(image_decision_id: int):
+    """The PNG the model was sent (the only input it received)."""
+    conn = _paper_conn()
+    try:
+        d = get_image_decision(conn, image_decision_id)
+        path = stored_path(conn, d["image"]["path"]) if d else None
+    finally:
+        conn.close()
+    if path is None or not path.exists():
+        raise HTTPException(404, f"image decision {image_decision_id} has no stored chart image")
     return FileResponse(path, media_type="image/png")
 
 

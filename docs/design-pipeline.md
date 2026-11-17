@@ -104,6 +104,8 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | SmokeTest: one command, temporary DB, FastAPI + Vite + headless Chrome (Playwright), three checks, report, cleanup; GitHub Actions on push | `backend/smoke.py`, `.github/workflows/smoke.yml`, `backend/requirements-dev.txt` | exists |
 | Test controls (TEST_FEED=on only): fixed server clock, runtime test-double answers / failures; automation order size per Start | `backend/recorder.py` (`TEST_NOW_MS`), `backend/decisions.py` (`TEST_ANSWERS`), `backend/app.py` (`/api/test/clock`, `/api/test/provider`), `backend/automation.py` | exists |
 | Voice panel: decision picker, microphone (getUserMedia) indicator, Web Speech recognition + synthesis, End releases the microphone | `frontend/src/VoicePanel.vue` | exists |
+| Image-only chart decision (Prompt 16): only the PNG + fixed instructions go to the model, one question `stance` (long / short / wait), stored in `image_decisions`; never a trade | `backend/image_decisions.py`, `/api/image-decisions*` | exists |
+| Chart-only decision panel with a step-by-step flowchart (Browser / Backend / Model lanes), and stance markers on the main chart | `frontend/src/ImageDecisionPanel.vue`, `CandleChart.vue` (`stances` prop), `chartAdapter.js` (`toStanceMarkers`), `App.vue` | exists |
 | Voice | – | planned (Prompt 13) |
 
 ## File responsibilities
@@ -323,6 +325,49 @@ VoicePanel: choose decision -> Start voice
 Deviation from the prompt: no WebRTC audio stream to a model (the Claude API has no audio).
 ```
 
+## Chart-only decision path (Prompt 16)
+
+The same flowchart is drawn in the panel, and each step lights up while a request runs.
+
+```mermaid
+flowchart TD
+  subgraph Browser["Browser (Vue)"]
+    A["1 Choose a cutoff candle<br/>ImageDecisionPanel"]
+    C["3 Draw the frozen chart off screen<br/>Lightweight Charts takeScreenshot -> PNG"]
+    G["7 Show the stance + marker on the main chart"]
+  end
+  subgraph Backend["Backend (FastAPI + SQLite)"]
+    B["2 Freeze the snapshot<br/>decision_snapshots"]
+    D["4 Check the PNG and the capture<br/>store captures/snapshot-id-sha.png"]
+    F["6 Validate 'stance' by name<br/>image_decisions"]
+  end
+  subgraph Model["Model (Claude)"]
+    E["5 Look at the image only<br/>answer: long / short / wait"]
+  end
+  A -->|"POST /api/decisions/snapshots"| B
+  B -->|"chart section"| C
+  C -->|"POST /api/image-decisions<br/>PNG + snapshot ID"| D
+  D -->|"PNG + fixed text only"| E
+  E -->|"stance"| F
+  F -->|"record"| G
+  G -.->|"GET /api/image-decisions (markers)"| F
+  P[("Paper account")]
+  G -.->|"never: no order"| P
+```
+
+```
+POST /api/image-decisions {snapshot_id, image_png, capture {snapshot_id, symbol, interval, cutoff}}
+  load_snapshot (missing, or no cutoff candle -> 422) ; read_png (unreadable -> 422) ; check_capture (mismatch -> 422)
+  store_png -> <db folder>/captures/snapshot-<id>-<sha16>.png
+  build_request: developer instructions + ONE user message [input_text (fixed), input_image (data URL)]
+                 question "stance": long | short | wait            (no input_json: no symbol, prices, SMAs, account)
+  provider = make_provider()  (Claude: image block + structured output {"stance": enum}; test double; OpenAI)
+  image_decisions row: status, stance, python_crossover (comparison only), image path + sha256,
+                       request (image as a file reference), response, latency
+GET /api/image-decisions?symbol&timeframe -> latest decided stance per candle -> CandleChart markers
+  long: green arrow below the bar; short: red arrow above; wait: grey circle. Paper tables are never written.
+```
+
 ## SmokeTest path (Prompt 14)
 
 ```
@@ -335,6 +380,9 @@ python3 -m backend.smoke
     2 Live TESTSMA, SMA 2/3, cutoff 15:04 -> Ask about chart (POST /api/test/provider answers)
         screen answers / verdict / eligibility; SQLite response_json.received_images + received_snapshot
         (analyst and reviewer); stored PNG decoded in the browser; fills unchanged; then fail=provider_error
+    2b Chart-only decision (Prompt 16), cutoff 15:04, answers stance=short -> screen stance / MOCK / flowchart
+        step 7 done; SQLite request parts = [input_text, input_image], test double received no snapshot data,
+        same PNG sha256; marker list; orders, fills, decisions unchanged; then fail=timeout (step 5 failed, no marker)
     3 TESTAUTO on the test clock (POST /api/test/clock + /api/test/observations), automation Start (size 4)
         m4 up: buy 4 -> fill 100; duplicate apply/claim; Stop, Start (size 1); m5 down: sell 1 -> fill 110;
         m6 up: veto; m7: hold (no order); m8 down: close 3 -> fill 105; screen + SQLite: $1,025, 0, $25, $0;
@@ -381,6 +429,8 @@ observations".
 |---|---|---|---|---|
 | `decision_snapshots` | frozen snapshot | `kind` (application/test), `symbol`, `interval`, `decision_ms`, `candle_ts`, `complete`, `snapshot_json` (candle, SMAs, crossover, account, chart section) | `id` | `decisions.create_snapshot` |
 | `decisions` | decision (analyst + reviewer) | `snapshot_id`, `provider`, `model`, `call_kind` (live/mock), `status`, `proposal`, `validation_*`, `eligible_for_order`, `explanation`, `request_json` / `response_json` (images as file references), `questions_json`, `answers_json`, `chart_checks_json`, `image_path` + `image_json` (sha256), `reviewer_status`, `verdict`, `reviewer_model`, `review_json`, `strategy_json`, `final_check_json` | `id` | `decisions.decide` |
+
+| `image_decisions` | image-only stance (Prompt 16) | `snapshot_id`, `symbol`, `interval`, `candle_ts` (marker position), `provider`, `model`, `call_kind` (live/mock), `status` (decided / malformed_answer / timeout / provider_error), `stance` (long / short / wait), `python_crossover` (comparison only, not sent), `image_path` + `image_json` (sha256), `request_json` (image as a file reference), `response_json`, `error`, `latency_ms` | `id`; index `(symbol, interval, candle_ts)` | `image_decisions.decide_image` |
 
 Chart captures are PNG files beside the database (`captures/snapshot-<id>-<sha>.png`, ignored by Git).
 

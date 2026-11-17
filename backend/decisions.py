@@ -471,7 +471,8 @@ class TestDoubleDecisions:
 
     It decodes any input_image it receives and reports the PNG's sha256 and size in its response, so a check can
     prove the provider received a decodable PNG identical to the stored capture. Answers come from
-    DECISIONS_TEST_ANSWERS, e.g. "action=buy,crossover=up,evidence=sufficient" (default), or from TEST_ANSWERS when
+    DECISIONS_TEST_ANSWERS, e.g. "action=buy,crossover=up,evidence=sufficient,stance=long" (default; "stance" is
+    the image-only question of Prompt 16), or from TEST_ANSWERS when
     the TEST_FEED-gated /api/test/provider route has set it. "fail=provider_error" or "fail=timeout" makes the call
     fail that way. Each response also reports the symbol and candle time it received (the model boundary).
     """
@@ -482,7 +483,7 @@ class TestDoubleDecisions:
 
     def __init__(self, answers: str | None = None):
         spec = answers if answers is not None else TEST_ANSWERS if TEST_ANSWERS is not None else os.environ.get(
-            "DECISIONS_TEST_ANSWERS", "action=buy,crossover=up,evidence=sufficient")
+            "DECISIONS_TEST_ANSWERS", "action=buy,crossover=up,evidence=sufficient,stance=long")
         self.answers = dict(item.split("=", 1) for item in spec.split(",") if "=" in item)
         self.received = []
 

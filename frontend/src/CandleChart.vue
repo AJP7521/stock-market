@@ -3,7 +3,7 @@
 // `rows` sets the whole history; `upsert(row)` updates one candle in place (live updates).
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CandlestickSeries, HistogramSeries, LineSeries, createChart, createSeriesMarkers } from 'lightweight-charts'
-import { colors, formatChartTime, toBars, toIndicatorLines, toSeriesData, toSmaData } from './chartAdapter.js'
+import { colors, formatChartTime, toBars, toIndicatorLines, toSeriesData, toSmaData, toStanceMarkers } from './chartAdapter.js'
 
 const props = defineProps({
   rows: { type: Array, required: true }, // backend candles: timestamp, open, high, low, close, volume
@@ -13,6 +13,8 @@ const props = defineProps({
   // {width, height} in CSS pixels: a fixed-size chart for capture. It is laid out synchronously, so a capture does
   // not wait for the browser to draw a frame (a hidden page may not draw any).
   fixedSize: { type: Object, default: null },
+  // Image-only decisions (Prompt 16) shown as markers at their cutoff candle: [{candle_time, stance}]
+  stances: { type: Array, default: () => [] },
 })
 
 const container = ref(null)
@@ -24,6 +26,7 @@ let volumeSeries
 let shortSeries
 let longSeries
 let markers
+let smaMarkers = []
 let byTime = new Map()     // chart time -> backend row
 let smaByTime = new Map()  // chart time -> SMA point
 const indicatorSeries = new Map()   // indicator id -> line series
@@ -64,9 +67,16 @@ function applySma(sma) {
   const { short, long, markers: m, byTime: points } = toSmaData(sma)
   shortSeries.setData(short)
   longSeries.setData(long)
-  markers.setMarkers(m)
+  smaMarkers = m
+  applyMarkers()
   smaByTime = points
   if (!hovering) showLatest()
+}
+
+/** Crossover markers plus stance markers for candles on the chart, in time order. */
+function applyMarkers() {
+  const stance = toStanceMarkers(props.stances).filter((m) => byTime.has(m.time))
+  markers.setMarkers([...smaMarkers, ...stance].sort((a, b) => a.time - b.time))
 }
 
 function latestTime() {
@@ -83,6 +93,7 @@ function render(rows) {
   byTime = new Map(candles.map((c, i) => [c.time, rows[i]]))
   candleSeries.setData(candles)
   volumeSeries.setData(volumes)
+  applyMarkers()
   // autoSize measures the container asynchronously; fit after it has a width.
   requestAnimationFrame(() => chart?.timeScale().fitContent())
   showLatest()
@@ -97,6 +108,7 @@ function upsert(row) {
   volumeSeries.update(volume, historical)
   const appended = !byTime.has(candle.time)
   byTime.set(candle.time, row)
+  if (appended && props.stances.length) applyMarkers()
   if (appended) chart.timeScale().fitContent()   // keep a newly started candle in view
   if (!hovering) showLatest()
 }
@@ -167,6 +179,7 @@ onMounted(() => {
 watch(() => props.rows, (rows) => chart && render(rows))
 watch(() => props.sma, (sma) => chart && applySma(sma))
 watch(() => props.indicators, (list) => chart && applyIndicators(list))
+watch(() => props.stances, () => chart && applyMarkers())
 
 onBeforeUnmount(() => chart?.remove())
 </script>

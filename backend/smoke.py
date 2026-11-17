@@ -13,6 +13,9 @@ What it does
     1. Replay the recorded session, add an SMA, change its window, compare with a hand calculation.
     2. Ask about chart: decodable chart pixels and the matching symbol/candle at the model boundary, known answers on
        screen, fill count unchanged; then a provider failure shown on screen.
+    2b. Chart-only decision (Prompt 16): the model boundary received only text + the PNG (no snapshot data), the
+       stance on screen matches SQLite and the marker list, the flowchart reached its last step, no order, fill or
+       decision row was added; then a timeout shown on screen with no new marker.
     3. Paper automation with the test clock: buy 4 @ 100, sell 1 @ 110, close 3 @ 105 -> $1,025, 0 shares,
        $25 realized, $0 unrealized; a veto and a duplicate add no fill; after Stop a new candle places no order.
 * Writes test-results/smoke-<time>/report.md (and a screenshot, logs and the database on failure), stops the browser
@@ -296,6 +299,50 @@ class Smoke:
         self.check(s, "fill count unchanged after the failure", fills_before,
                    self.sql("SELECT count(*) FROM paper_fills")[0][0])
 
+    # ------------------------------------------------------------------ check 2b
+    def check_image_decision(self):
+        s = "2b chart-only decision"
+        page = self.page
+        counts = lambda: self.sql("SELECT (SELECT count(*) FROM paper_orders), (SELECT count(*) FROM paper_fills), "
+                                  "(SELECT count(*) FROM decisions)")[0]
+        before = counts()
+        page.get_by_test_id("img-cutoff").select_option("2026-11-09T15:04:00Z")
+        self.answers("stance=short")
+        page.get_by_test_id("img-button").click()
+        page.get_by_test_id("img-status").wait_for(timeout=20000)
+        image_id = int(self.text("img-decision-id").lstrip("#"))
+        # text_content: the stance is shown in capitals by CSS only; the element's text is the stored value
+        self.check(s, "stance on screen", "short", page.get_by_test_id("img-stance").text_content().strip())
+        self.check(s, "status on screen", "decided", self.text("img-status"))
+        self.check(s, "model call label", "MOCK (provider test double)", self.text("img-call-kind"))
+        self.check(s, "no-trade notice on screen", True, self.text("img-no-trade").startswith("No trade placed"))
+        self.check(s, "flowchart reached step 7", "done",
+                   page.get_by_test_id("img-flow-step-7").get_attribute("data-state"))
+        stance, request, response, image_json = self.sql(
+            "SELECT stance, request_json, response_json, image_json FROM image_decisions WHERE id = ?", (image_id,))[0]
+        request, response, image = json.loads(request), json.loads(response), json.loads(image_json)
+        self.check(s, "SQLite stance", "short", stance)
+        self.check(s, "message parts sent (no snapshot JSON)", ["input_text", "input_image"],
+                   [part["type"] for part in request["input"][1]["content"]])
+        self.check(s, "test double saw no snapshot data", {"snapshot_id": None, "symbol": None, "candle_time": None},
+                   response["received_snapshot"])
+        self.check(s, "received PNG = stored capture (sha256)", image["sha256"],
+                   response["received_images"][0]["sha256"])
+        self.check(s, "Python crossover shown for comparison", True, " up " in f" {self.text('img-compare')} ")
+        markers = self.api("GET", f"/api/image-decisions?symbol={SMA_SYMBOL}&timeframe=1m")["image_decisions"]
+        self.check(s, "chart marker source (candle, stance)", [("2026-11-09T15:04:00Z", "short")],
+                   [(m["candle_time"], m["stance"]) for m in markers])
+        self.check(s, "orders, fills and decisions unchanged", before, counts())
+        # a provider timeout: shown on screen, stored, no new marker
+        self.answers("fail=timeout")
+        page.get_by_test_id("img-button").click()
+        self.check(s, "timeout status on screen", "timeout", self.wait_text("img-status", "timeout", 20))
+        self.check(s, "timeout shown in the flowchart (model step failed)", "failed",
+                   page.get_by_test_id("img-flow-step-5").get_attribute("data-state"))
+        markers = self.api("GET", f"/api/image-decisions?symbol={SMA_SYMBOL}&timeframe=1m")["image_decisions"]
+        self.check(s, "no marker from the timeout", ["short"], [m["stance"] for m in markers])
+        self.check(s, "orders, fills and decisions unchanged after the timeout", before, counts())
+
     # ------------------------------------------------------------------ check 3
     def at(self, minute: int, second: int) -> datetime:
         return T0 + timedelta(minutes=minute, seconds=second)
@@ -439,7 +486,8 @@ class Smoke:
             self.page.set_default_timeout(15000)
             console = open(self.out / "browser-console.log", "w")
             self.page.on("console", lambda m: console.write(f"{m.type}: {m.text}\n"))
-            for step in (self.check_replay_sma, self.check_ask_about_chart, self.check_automation):
+            for step in (self.check_replay_sma, self.check_ask_about_chart, self.check_image_decision,
+                         self.check_automation):
                 print(f"- {step.__name__}", flush=True)
                 step()
         except Exception as exc:

@@ -278,6 +278,24 @@ no verdict, so add `DECISIONS_TEST_ANSWERS=action=buy,crossover=up,evidence=suff
 accepted review. Leave out `DECISIONS_PROVIDER=test` to
 ask Claude.
 
+### Chart-only decision (image → long, short or wait)
+
+The **Chart-only decision** panel sends Claude **only a picture of the chart**, not the candle data, and shows its
+stance: **long**, **short** or **wait**. Pick a completed cutoff candle and click **Send chart image**. The panel
+freezes a snapshot, draws it off screen, captures the PNG and posts it to `POST /api/image-decisions`. The backend
+checks the PNG, stores it and sends the model the image with fixed instructions only. The symbol, prices, SMA values,
+the Python crossover and the paper account stay on the server.
+
+The stance is a view of the chart for learning. **No trade is placed**: the simulator stays long-only, the paper
+account is never written, and these results are never eligible for execution. Each decided stance also appears as a
+marker on the main chart at its candle (long ▲ green, short ▼ red, wait ● grey), reloaded from SQLite
+(`GET /api/image-decisions?symbol=…&timeframe=…`). A flowchart in the panel shows which part (Vue, FastAPI, SQLite,
+Claude) does each step and lights up the active step. Results are stored in the `image_decisions` table; the PNG is
+served at `GET /api/image-decisions/{id}/image`.
+
+With the provider test double (`DECISIONS_PROVIDER=test`, as in the Ask about chart example above), the default
+answer is `stance=long` and the result is labelled **MOCK (provider test double)**.
+
 ### Configurable indicators
 
 The **Indicators** panel lists the indicator types Python provides (simple moving average, rolling price range). Give an
@@ -423,7 +441,9 @@ It creates a fresh temporary database with the labelled TESTSMA fixture, starts 
 `DECISIONS_PROVIDER=test`, `TEST_FEED=on`, no API keys) and Vite, waits for both, and drives headless Chrome through:
 (1) replaying the recorded session, adding an SMA, changing its window and comparing with a hand calculation;
 (2) Ask about chart: a decodable PNG with the right symbol and candle at the model boundary, known answers on screen,
-no fill, then a provider failure on screen; (3) paper automation on a test clock: buy 4 @ $100, sell 1 @ $110, close
+no fill, then a provider failure on screen; (2b) the chart-only decision: only text and the PNG reach the model,
+the stance on screen matches SQLite and the marker list, no order, fill or decision is added, then a timeout on
+screen; (3) paper automation on a test clock: buy 4 @ $100, sell 1 @ $110, close
 3 @ $105 → $1,025, 0 shares, $25 realized, $0 unrealized, with a veto, a duplicate and a candle after Stop adding no
 fill or order. It exits 1 if any expected result is missing, writes `test-results/smoke-<time>/report.md` (plus a
 screenshot, logs and the database on failure), and stops the browser and every process it started, also on failure.

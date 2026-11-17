@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AskChartPanel from './AskChartPanel.vue'
 import AutomationPanel from './AutomationPanel.vue'
 import CandleChart from './CandleChart.vue'
+import ImageDecisionPanel from './ImageDecisionPanel.vue'
 import IndicatorPanel from './IndicatorPanel.vue'
 import PaperPanel from './PaperPanel.vue'
 import VoicePanel from './VoicePanel.vue'
@@ -39,6 +40,9 @@ let smaTimer = null
 
 // Configured indicators (Prompt 9B): values calculated in Python for the chart's candles
 const indicators = ref([])
+
+// Image-only decisions (Prompt 16): the model's long/short/wait stance per candle, drawn as chart markers
+const stances = ref([])
 
 // Replay state
 const sessions = ref([])
@@ -80,7 +84,15 @@ async function loadHistory(gen) {
   source.value = body.source
   latestStatus.value = body.status.at(-1) ?? null
   chartKey.value++
-  await Promise.all([fetchSma(gen), fetchIndicators(gen)])
+  await Promise.all([fetchSma(gen), fetchIndicators(gen), fetchStances(gen)])
+}
+
+async function fetchStances(gen = generation) {
+  if (!symbol.value || symbol.value === 'SAMPLE') { stances.value = []; return }
+  const q = new URLSearchParams({ symbol: symbol.value, timeframe: timeframe.value })
+  const res = await fetch(`/api/image-decisions?${q}`)
+  if (!res.ok || gen !== generation) return
+  stances.value = (await res.json()).image_decisions
 }
 
 async function fetchIndicators(gen = generation) {
@@ -240,6 +252,7 @@ async function startReplay() {
   }
   symbol.value = body.symbol
   source.value = 'Replay of recorded Yahoo observations (SQLite, read-only)'
+  fetchStances()
   if (body.empty) {
     replayMessage.value = `${body.symbol} has no recorded observations between ${body.start} and ${body.end}.`
     return
@@ -506,7 +519,7 @@ onBeforeUnmount(() => {
           </span>
         </p>
         <CandleChart ref="chartRef" :key="chartKey" :rows="candles" :label="chartLabel" :sma="sma"
-                     :indicators="indicators" />
+                     :indicators="indicators" :stances="stances" />
       </section>
 
       <IndicatorPanel :symbol="mode === 'replay' ? (replaySymbol.trim().toUpperCase() || symbol) : symbol"
@@ -534,6 +547,11 @@ onBeforeUnmount(() => {
       <AskChartPanel v-if="candles.length && symbol !== 'SAMPLE'" :symbol="symbol" :timeframe="timeframe"
                      :candles="candles" :forming-timestamp="formingTimestamp" :sma-short="smaShort" :sma-long="smaLong"
                      :as-of="mode === 'replay' ? currentStep?.replay_time ?? null : null" />
+
+      <ImageDecisionPanel v-if="candles.length && symbol !== 'SAMPLE'" :symbol="symbol" :timeframe="timeframe"
+                          :candles="candles" :forming-timestamp="formingTimestamp" :sma-short="smaShort"
+                          :sma-long="smaLong" :as-of="mode === 'replay' ? currentStep?.replay_time ?? null : null"
+                          @decided="fetchStances()" />
 
       <AutomationPanel v-if="mode === 'live' && symbol && symbol !== 'SAMPLE'" :symbol="symbol" :timeframe="timeframe"
                        :sma-short="smaShort" :sma-long="smaLong" />

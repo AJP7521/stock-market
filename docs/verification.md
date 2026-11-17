@@ -985,3 +985,35 @@ The reference screenshot was used for style only; the page keeps its own name an
 | SmokeTest | `python3 -m backend.smoke` (**test data**, provider test double) | PASS 48/48 | **PASS 48/48** (`smoke-20261112-233100`); services and browser stopped |
 
 Not checked: the live AAPL view during market hours with the new layout.
+
+## Prompt 16 · Image-only chart decision: long, short or wait (2026-11-17)
+
+New: `backend/image_decisions.py` (table `image_decisions`, `POST/GET /api/image-decisions*`),
+`frontend/src/ImageDecisionPanel.vue` (panel + educational flowchart), stance markers in `CandleChart.vue` /
+`chartAdapter.js`, test-double default answer `stance=long`, SmokeTest check 2b, `backend/tests/test_image_decisions.py`.
+No new dependencies.
+
+### Mocked checks (provider test double, **test data**)
+| Check | Command / action | Expected | Observed |
+|---|---|---|---|
+| New unit tests | `python3 -m unittest backend.tests.test_image_decisions -v` | 7 OK | **7 OK**: only `input_text` + `input_image` sent, no symbol / candle time / close / crossover / cash in the request; Claude schema `{"stance": enum long, short, wait}`; malformed, timeout and provider errors stored with status; unreadable / mismatched capture rejected before any call; no order, fill or `decisions` row; one marker per candle (latest decided) |
+| All unit tests | `python3 -m unittest discover -s backend/tests -t .` | all OK | **125 tests, OK** |
+| Build | `cd frontend && npm run build` | no errors | built (JS 314.38 kB) |
+| SmokeTest run 1 | `python3 -m backend.smoke` | PASS | **FAIL 63/64** (`smoke-20261117-140519`): "stance on screen" expected `short`, observed `SHORT` |
+| AutoLoop cycle 1 | cause: the stance is shown in capitals by CSS (`text-transform`), and Playwright `inner_text` returns the displayed text. Fix (test only): read `text_content()` for that check | — | — |
+| SmokeTest run 2 | `python3 -m backend.smoke` | PASS | **PASS 64/64** (`smoke-20261117-140551`); 2b: request parts `[input_text, input_image]`, test double received no snapshot data, PNG sha256 matched, marker list `[(15:04, short)]`, flowchart step 7 `done`; timeout shown with step 5 `failed` and no new marker; orders/fills/decisions unchanged |
+
+### Live check (Claude, **live Yahoo data**, kept separate from the mocked checks)
+| Check | Action | Observed |
+|---|---|---|
+| Live image-only request | Built-in browser, `?symbol=AAPL&interval=1m`, SMA 5/20, cutoff 2026-11-17 19:05 UTC, 60 candles, **Send chart image** | Image decision #1: status `decided`, stance **wait**, `anthropic` / `claude-opus-5-5` (response model `claude-opus-5-5`, stop reason `end_turn`), 2660 ms, call kind `live`. Message parts on screen: `input_text + input_image`. Python crossover at that candle (comparison only): `none` |
+| SQLite matches the screen | `SELECT … FROM image_decisions` | `1|AAPL|1m|2026-11-17T19:05:00Z|anthropic|claude-opus-5-5|live|decided|wait|none|2660|captures/snapshot-9-6458ab0407bcdb05.png` |
+| Marker on the main chart | screenshot | grey circle "Claude: wait" at the 19:05 candle |
+| No trade | `paper_orders` / `paper_fills` | 3 orders (all submitted 2026-11-13), 0 fills: unchanged by this call |
+| Browser console | errors only | none |
+
+| Phone width | built-in browser, 375 × 812 | run 1: the three lanes were too narrow and step text overflowed its boxes. Fix: below 760 px the steps stack in one column with the lane as a tag. Run 2: one column, readable, no sideways page scroll |
+| SmokeTest run 3 (after the layout fix) | `python3 -m backend.smoke` | **PASS 64/64** (`smoke-20261117-140810`); build JS 314.45 kB |
+
+Not checked: a live `long` or `short` answer (only `wait` was observed live; `long` and `short` were covered by the
+test double); the panel in replay mode against Claude.

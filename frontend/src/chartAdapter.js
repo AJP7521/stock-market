@@ -88,4 +88,19 @@ export function toIndicatorLines(indicators) {
   }))
 }
 
+/**
+ * Markers for image-only chart decisions (Prompt 16): the model's stance at its cutoff candle.
+ * long: green arrow below the bar; short: red arrow above; wait: grey circle above. A view, never a trade.
+ */
+const WAIT = '#6b7280'
+export function toStanceMarkers(decisions) {
+  return (decisions ?? []).map((d) => ({
+    time: toChartTime(d.candle_time),
+    position: d.stance === 'long' ? 'belowBar' : 'aboveBar',
+    shape: d.stance === 'long' ? 'arrowUp' : d.stance === 'short' ? 'arrowDown' : 'circle',
+    color: d.stance === 'long' ? UP : d.stance === 'short' ? DOWN : WAIT,
+    text: `Claude: ${d.stance}`,
+  }))
+}
+
 export const colors = { UP, DOWN, SHORT, LONG }
