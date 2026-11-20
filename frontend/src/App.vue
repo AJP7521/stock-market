@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AskChartPanel from './AskChartPanel.vue'
 import AutomationPanel from './AutomationPanel.vue'
+import BacktestPanel from './BacktestPanel.vue'
+import { BackendUnreachable, backendFetch, createPoller } from './backend.js'
 import CandleChart from './CandleChart.vue'
 import ImageDecisionPanel from './ImageDecisionPanel.vue'
 import IndicatorPanel from './IndicatorPanel.vue'
@@ -69,14 +71,35 @@ async function checkHealth() {
     health.value = await res.json()
   } catch (e) {
     error.value = `Backend unreachable: ${e.message}`
+    healthPoller.start()
   }
 }
+
+// While the backend is unreachable: ask /api/health with a growing pause (2 s, 4 s … 30 s). When it answers, show
+// it in the header and, in live mode, reload the candles and reopen the WebSocket for the same symbol.
+const healthPoller = createPoller(async () => {
+  const res = await backendFetch('/api/health')
+  if (!res.ok) throw new BackendUnreachable(`HTTP ${res.status}`)
+  health.value = await res.json()
+  error.value = ''
+  healthPoller.stop()
+  if (mode.value === 'live') { symbolInput.value = symbol.value; selectLive() }
+}, 2000)
+
+/** A request failed: if the backend is unreachable, say so in the header and wait for it; never leave it uncaught. */
+function backendLost(e) {
+  if (!(e instanceof BackendUnreachable)) { console.warn('request failed:', e); return }
+  health.value = null
+  error.value = 'Backend unreachable: retrying…'
+  healthPoller.start()
+}
+const quietly = (promise) => promise.catch(backendLost)
 
 // ---------------------------------------------------------------- live mode
 async function loadHistory(gen) {
   historyError.value = ''
   const q = new URLSearchParams({ symbol: symbol.value, timeframe: timeframe.value })
-  const res = await fetch(`/api/history?${q}`)
+  const res = await backendFetch(`/api/history?${q}`)
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const body = await res.json()
   if (gen !== generation) return
@@ -90,20 +113,20 @@ async function loadHistory(gen) {
 async function fetchStances(gen = generation) {
   if (!symbol.value || symbol.value === 'SAMPLE') { stances.value = []; return }
   const q = new URLSearchParams({ symbol: symbol.value, timeframe: timeframe.value })
-  const res = await fetch(`/api/image-decisions?${q}`)
+  const res = await backendFetch(`/api/image-decisions?${q}`)
   if (!res.ok || gen !== generation) return
   stances.value = (await res.json()).image_decisions
 }
 
 async function fetchIndicators(gen = generation) {
   const q = new URLSearchParams({ symbol: symbol.value, timeframe: timeframe.value })
-  const res = await fetch(`/api/indicator-values?${q}`)
+  const res = await backendFetch(`/api/indicator-values?${q}`)
   if (!res.ok || gen !== generation) return
   indicators.value = (await res.json()).indicators
 }
 
 function indicatorsChanged() {
-  if (mode.value === 'live') fetchIndicators()
+  if (mode.value === 'live') quietly(fetchIndicators())
   else if (replay.value) startReplay()
 }
 
@@ -120,7 +143,7 @@ async function fetchSma(gen = generation) {
   const params = smaParams()
   if (!params) { sma.value = null; smaError.value = ''; return }
   const q = new URLSearchParams({ symbol: symbol.value, timeframe: timeframe.value, ...params })
-  const res = await fetch(`/api/indicators/sma?${q}`)
+  const res = await backendFetch(`/api/indicators/sma?${q}`)
   const body = await res.json()
   if (gen !== generation) return
   if (!res.ok) {
@@ -134,11 +157,11 @@ async function fetchSma(gen = generation) {
 // Live candles arrive about once a second; recalculate the SMAs at most once a second.
 function scheduleSma() {
   if (smaTimer) return
-  smaTimer = setTimeout(() => { smaTimer = null; fetchSma(); fetchIndicators() }, 1000)
+  smaTimer = setTimeout(() => { smaTimer = null; quietly(fetchSma()); quietly(fetchIndicators()) }, 1000)
 }
 
 function applySmaSettings() {
-  if (mode.value === 'live') fetchSma()
+  if (mode.value === 'live') quietly(fetchSma())
   else if (replay.value || replayMessage.value) startReplay()
 }
 
@@ -185,6 +208,7 @@ async function selectLive() {
     await loadHistory(gen)
   } catch (e) {
     historyError.value = `Could not load candles: ${e.message}`
+    backendLost(e)
   }
   if (gen === generation) openSocket(gen)
 }
@@ -214,8 +238,14 @@ async function enterReplay() {
   replayMessage.value = ''
   candles.value = []
   chartKey.value++
-  const res = await fetch('/api/replay/sessions')
-  sessions.value = (await res.json()).sessions
+  try {
+    const res = await backendFetch('/api/replay/sessions')
+    sessions.value = (await res.json()).sessions
+  } catch (e) {
+    replayMessage.value = `Could not load recorded sessions: ${e.message}`
+    backendLost(e)
+    return
+  }
   if (sessions.value.length && !sessions.value.some((s) => s.symbol === replaySymbol.value)) {
     pickSession(sessions.value[0].symbol)
   }
@@ -244,15 +274,22 @@ async function startReplay() {
     symbol: replaySymbol.value.trim().toUpperCase(), start: replayStart.value, end: replayEnd.value,
     timeframe: timeframe.value, ...(smaParams() ?? {}),
   })
-  const res = await fetch(`/api/replay?${q}`)
-  const body = await res.json()
+  let res, body
+  try {
+    res = await backendFetch(`/api/replay?${q}`)
+    body = await res.json()
+  } catch (e) {
+    replayMessage.value = `Replay request failed: ${e.message}`
+    backendLost(e)
+    return
+  }
   if (!res.ok) {
     replayMessage.value = `Replay request failed: ${smaProblem(body)}`
     return
   }
   symbol.value = body.symbol
   source.value = 'Replay of recorded Yahoo observations (SQLite, read-only)'
-  fetchStances()
+  quietly(fetchStances())
   if (body.empty) {
     replayMessage.value = `${body.symbol} has no recorded observations between ${body.start} and ${body.end}.`
     return
@@ -315,6 +352,10 @@ const feedClass = computed(() => ({
   live: 'ok', quiet: 'warn', connecting: 'warn', offline: 'muted',
 }[feed.value?.status] ?? 'bad'))
 
+// Backtest (Prompt 17): the symbol on the chart (in replay: the recorded symbol being replayed)
+const backtestSymbol = computed(() => (mode.value === 'replay'
+  ? (replaySymbol.value.trim().toUpperCase() || symbol.value) : symbol.value))
+
 const chartLabel = computed(() => {
   if (mode.value === 'replay') return `Replay · ${symbol.value || replaySymbol.value} · ${timeframe.value}`
   return symbol.value === 'SAMPLE' ? 'Synthetic one-minute sample (prompts/data/sample-candles.csv)'
@@ -350,6 +391,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   clearInterval(clock)
   clearTimeout(smaTimer)
+  healthPoller.stop()
   stopReplay()
   closeSocket()
 })
@@ -551,10 +593,13 @@ onBeforeUnmount(() => {
       <ImageDecisionPanel v-if="candles.length && symbol !== 'SAMPLE'" :symbol="symbol" :timeframe="timeframe"
                           :candles="candles" :forming-timestamp="formingTimestamp" :sma-short="smaShort"
                           :sma-long="smaLong" :as-of="mode === 'replay' ? currentStep?.replay_time ?? null : null"
-                          @decided="fetchStances()" />
+                          @decided="quietly(fetchStances())" />
 
       <AutomationPanel v-if="mode === 'live' && symbol && symbol !== 'SAMPLE'" :symbol="symbol" :timeframe="timeframe"
                        :sma-short="smaShort" :sma-long="smaLong" />
+
+      <BacktestPanel v-if="backtestSymbol" :symbol="backtestSymbol" :timeframe="timeframe"
+                     :sma-short="smaShort" :sma-long="smaLong" />
     </main>
 
     <aside class="side-col">

@@ -1,7 +1,8 @@
 <script setup>
 // Create, list and remove named indicator instances for one symbol.
 // Types and their settings come from FastAPI; Python validates and stores them in SQLite.
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { backendFetch, createPoller } from './backend.js'
 
 const props = defineProps({ symbol: { type: String, required: true } })
 const emit = defineEmits(['changed'])
@@ -21,7 +22,7 @@ function resetSettings() {
 }
 
 async function loadTypes() {
-  const res = await fetch('/api/indicator-types')
+  const res = await backendFetch('/api/indicator-types')
   types.value = (await res.json()).types
   if (!typeKey.value && types.value.length) {
     typeKey.value = types.value[0].key
@@ -30,7 +31,7 @@ async function loadTypes() {
 }
 
 async function loadConfigs() {
-  const res = await fetch(`/api/indicator-configs?${new URLSearchParams({ symbol: props.symbol })}`)
+  const res = await backendFetch(`/api/indicator-configs?${new URLSearchParams({ symbol: props.symbol })}`)
   configs.value = (await res.json()).indicators
 }
 
@@ -45,7 +46,7 @@ async function add() {
   try {
     // Send the number as typed; Python decides whether it is valid.
     const typed = Object.fromEntries(Object.entries(settings.value).map(([k, v]) => [k, v === '' ? null : v]))
-    const res = await fetch('/api/indicator-configs', {
+    const res = await backendFetch('/api/indicator-configs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ symbol: props.symbol, name: name.value, type: typeKey.value, settings: typed }),
@@ -58,22 +59,42 @@ async function add() {
     name.value = ''
     await loadConfigs()
     emit('changed')
+  } catch (e) {
+    error.value = `Not added: ${e.message}`
   } finally {
     busy.value = false
   }
 }
 
 async function remove(cfg) {
-  await fetch(`/api/indicator-configs/${cfg.id}`, { method: 'DELETE' })
-  await loadConfigs()
-  emit('changed')
+  try {
+    await backendFetch(`/api/indicator-configs/${cfg.id}`, { method: 'DELETE' })
+    await loadConfigs()
+    emit('changed')
+  } catch (e) {
+    error.value = `Not removed: ${e.message}`
+  }
 }
 
 const describe = (cfg) => Object.entries(cfg.settings).map(([k, v]) => `${k} ${v}`).join(', ')
 const typeLabel = (key) => types.value.find((t) => t.key === key)?.label ?? key
 
-watch(() => props.symbol, () => { error.value = ''; loadConfigs() })
-onMounted(async () => { await loadTypes(); await loadConfigs() })
+// Load types and this symbol's indicators; if the backend is unreachable, keep trying (2 s, 4 s … 30 s) until it
+// answers, then stop.
+const loader = createPoller(async () => {
+  try {
+    await loadTypes()
+    await loadConfigs()
+  } catch (e) {
+    error.value = `Indicators not loaded: ${e.message}`
+    throw e
+  }
+  error.value = ''
+  loader.stop()
+}, 2000)
+watch(() => props.symbol, () => { error.value = ''; loader.start() })
+onMounted(() => loader.start())
+onBeforeUnmount(() => loader.stop())
 </script>
 
 <template>

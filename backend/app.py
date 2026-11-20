@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from backend.candles import iso_ms
 from backend import automation  # noqa: E402  (also registers the simulator's pre-fill checks)
+from backend import backtest  # noqa: E402
 from backend import voice  # noqa: E402
 from backend.chart_images import ImageRejected, stored_path
 from backend.decisions import create_snapshot, decide, get_decision, load_snapshot, make_provider
@@ -373,6 +374,57 @@ def paper_order(body: OrderIn) -> dict:
         conn.close()
 
 
+# ---------------------------------------------------------------- backtests (Prompt 17)
+
+class BacktestIn(BaseModel):
+    symbol: str = Field(min_length=1, max_length=20)
+    timeframe: Timeframe = "1m"
+    short: int
+    long: int
+    starting_cash: float = Field(1000, gt=0, le=1_000_000_000)
+    start: str | None = None        # first candle start (UTC), inclusive
+    end: str | None = None          # candle start (UTC), exclusive
+    as_of: str | None = None        # use only data known at this UTC time (default: now)
+
+
+@app.post("/api/backtests", status_code=201)
+def create_backtest(body: BacktestIn) -> dict:
+    """Run the rule-based SMA crossover backtest on stored candles and save it (SIMULATED)."""
+    _check_windows(body.short, body.long)
+    for name in ("start", "end"):
+        _parse_as_of(getattr(body, name))           # 422 for an unreadable time
+    conn = connect(db_path())
+    try:
+        return backtest.run_backtest(conn, body.symbol.upper(), body.timeframe, body.short, body.long,
+                                     body.starting_cash, body.start, body.end, _parse_as_of(body.as_of))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    finally:
+        conn.close()
+
+
+@app.get("/api/backtests")
+def backtest_runs(symbol: str | None = None) -> dict:
+    """Saved backtest runs (newest first), summaries only."""
+    conn = connect(db_path())
+    try:
+        return {"runs": backtest.list_runs(conn, symbol.upper() if symbol else None)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/backtests/{run_id}")
+def backtest_run(run_id: int) -> dict:
+    """One saved run with its orders and fills, equity curve, round trips and interpretation."""
+    conn = connect(db_path())
+    try:
+        return backtest.get_run(conn, run_id)
+    except KeyError:
+        raise HTTPException(404, f"no backtest run {run_id}")
+    finally:
+        conn.close()
+
+
 class TestObservationIn(BaseModel):
     symbol: str = Field(min_length=1, max_length=20)
     price: float = Field(gt=0)
@@ -425,6 +477,24 @@ def test_provider(body: TestProviderIn) -> dict:
     import backend.decisions as decisions_module
     decisions_module.TEST_ANSWERS = body.answers
     return {"answers": decisions_module.TEST_ANSWERS}
+
+
+class TestPositionIn(BaseModel):
+    state: Literal["empty", "open", "unknown"] | None = None     # null = use the paper account again
+    direction: Literal["long", "short"] | None = None             # required when state = open
+
+
+@app.post("/api/test/position")
+def test_position(body: TestPositionIn) -> dict:
+    """TEST FEED ONLY (Prompt 16F): override the position context of image-only decisions, or release it."""
+    if not TEST_FEED:
+        raise HTTPException(403, "the test controls are off; start the backend with TEST_FEED=on")
+    if (body.state == "open") != (body.direction is not None):
+        raise HTTPException(422, "give a direction exactly when state is open")
+    import backend.image_decisions as image_module
+    image_module.TEST_POSITION = (None if body.state is None
+                                  else {"state": body.state, "direction": body.direction})
+    return {"test_position": image_module.TEST_POSITION}
 
 
 # ---------------------------------------------------------------- decisions (Prompt 10)

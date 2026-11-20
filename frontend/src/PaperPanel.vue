@@ -3,6 +3,7 @@
 // Every click sends one request to FastAPI's single execution function, with a fresh request_id.
 // "Retry last request" re-sends the same request_id: the backend must return the original order.
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { backendFetch, createPoller } from './backend.js'
 
 const props = defineProps({ symbol: { type: String, required: true } })
 
@@ -12,7 +13,6 @@ const message = ref('')
 const messageKind = ref('info')
 const lastRequest = ref(null)
 const pnl = ref([])
-let timer = null
 
 const money = (v) => (v === null || v === undefined ? '—'
   : v.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }))
@@ -20,8 +20,8 @@ const shares = computed(() => account.value?.positions?.[props.symbol] ?? 0)
 
 async function refresh() {
   const [res, pnlRes] = await Promise.all([
-    fetch('/api/paper/account'),
-    fetch(`/api/paper/pnl?${new URLSearchParams({ symbol: props.symbol })}`),
+    backendFetch('/api/paper/account'),
+    backendFetch(`/api/paper/pnl?${new URLSearchParams({ symbol: props.symbol })}`),
   ])
   if (res.ok) account.value = await res.json()
   if (pnlRes.ok) pnl.value = (await pnlRes.json()).rows
@@ -31,10 +31,17 @@ const signed = (v) => (v === null || v === undefined ? 'unavailable' : money(v))
 
 async function send(request) {
   lastRequest.value = request
-  const res = await fetch('/api/paper/orders', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
-  })
-  const body = await res.json()
+  let res, body
+  try {
+    res = await backendFetch('/api/paper/orders', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
+    })
+    body = await res.json()
+  } catch (e) {
+    messageKind.value = 'bad'
+    message.value = `Request not sent: ${e.message}. Use "Retry last request" when the backend is back.`
+    return
+  }
   if (!res.ok) {
     messageKind.value = 'bad'
     message.value = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
@@ -56,8 +63,11 @@ function retryLast() {
   if (lastRequest.value) send(lastRequest.value)
 }
 
-onMounted(() => { refresh(); timer = setInterval(refresh, 1000) })   // pending orders fill as prices arrive
-onBeforeUnmount(() => clearInterval(timer))
+// Pending orders fill as prices arrive: refresh every second, less often while the backend is unreachable.
+const poller = createPoller(refresh, 1000)
+const offline = poller.offline
+onMounted(() => poller.start())
+onBeforeUnmount(() => poller.stop())
 </script>
 
 <template>
@@ -78,6 +88,8 @@ onBeforeUnmount(() => clearInterval(timer))
       <button type="button" data-testid="paper-wait" @click="submit('wait')">Wait</button>
       <button type="button" :disabled="!lastRequest" data-testid="paper-retry" @click="retryLast">Retry last request</button>
     </div>
+    <p v-if="offline" class="bad" data-testid="paper-offline">Backend unreachable: showing the last values received;
+      retrying less often until it answers.</p>
     <p v-if="message" :class="messageKind" data-testid="paper-message">{{ message }}</p>
     <table v-if="account?.orders?.length" data-testid="paper-orders">
       <thead>

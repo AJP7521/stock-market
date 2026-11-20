@@ -89,6 +89,18 @@ def _valuation(quantity: int, basis: int, realized: int, price_micros: int | Non
     return unrealized, realized + unrealized, "ok"
 
 
+def apply_fill(basis: int, realized: int, held_before: int, side: str, qty: int, price_micros: int) -> tuple[int, int]:
+    """Weighted-average-cost update for one fill; returns (basis, realized) in micro-dollars.
+
+    Shared by the paper account (record_fill) and the backtest (backend/backtest.py), so both use one P&L rule.
+    side is "buy", "sell" or "close"; held_before is the share count before this fill.
+    """
+    if side == "buy":
+        return basis + qty * price_micros, realized
+    removed = basis if qty == held_before else round(Fraction(basis * qty, held_before))
+    return basis - removed, realized + qty * price_micros - removed
+
+
 def _insert(conn, **row) -> bool:
     cur = conn.execute(
         f"INSERT OR IGNORE INTO pnl_history ({', '.join(row)}) VALUES ({', '.join('?' for _ in row)})",
@@ -110,12 +122,7 @@ def record_fill(conn: sqlite3.Connection, fill_id: int) -> bool:
     account_id, symbol, side, qty, price, obs_id, executed, cash_after, pos_after = tuple(f)
     basis, realized = _basis(conn, account_id, symbol)
     held_before = pos_after - qty if side == "buy" else pos_after + qty
-    if side == "buy":
-        basis += qty * price
-    else:
-        removed = basis if qty == held_before else round(Fraction(basis * qty, held_before))
-        realized += qty * price - removed
-        basis -= removed
+    basis, realized = apply_fill(basis, realized, held_before, side, qty, price)
     conn.execute("INSERT INTO paper_cost_basis (account_id, symbol, basis_micros, realized_micros) VALUES (?, ?, ?, ?) "
                  "ON CONFLICT (account_id, symbol) DO UPDATE SET basis_micros = excluded.basis_micros, "
                  "realized_micros = excluded.realized_micros", (account_id, symbol, basis, realized))

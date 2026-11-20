@@ -13,11 +13,15 @@ What it does
     1. Replay the recorded session, add an SMA, change its window, compare with a hand calculation.
     2. Ask about chart: decodable chart pixels and the matching symbol/candle at the model boundary, known answers on
        screen, fill count unchanged; then a provider failure shown on screen.
-    2b. Chart-only decision (Prompt 16): the model boundary received only text + the PNG (no snapshot data), the
-       stance on screen matches SQLite and the marker list, the flowchart reached its last step, no order, fill or
-       decision row was added; then a timeout shown on screen with no new marker.
+    2b. Chart-only decision (Prompts 16, 16A, 16C, 16D, 16E), test clock 15:05:20: the model boundary received only the context
+       text (capture time, not stale) + the PNG (no snapshot data), the chart_signal answer on screen matches SQLite,
+       Python's expected answer (long: TESTSMA closes 13 then 19) and the marker list, the flowchart reached its
+       last step, no order, fill or decision row was added; then a timeout shown on screen with no new marker.
     3. Paper automation with the test clock: buy 4 @ 100, sell 1 @ 110, close 3 @ 105 -> $1,025, 0 shares,
        $25 realized, $0 unrealized; a veto and a duplicate add no fill; after Stop a new candle places no order.
+    4. Backtest (Prompt 17) on the labelled TESTBT fixture, SMA 2/4, $1,000: the summary tiles, the five orders and
+       fills and the stored backtest_runs / backtest_fills rows match a hand calculation (fills at the next open);
+       the panel labels the data as TEST and lists what the result leaves uncertain.
 * Writes test-results/smoke-<time>/report.md (and a screenshot, logs and the database on failure), stops the browser
   and every process it started (also on failure), and exits 1 if any expected result is missing.
 
@@ -40,7 +44,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from backend.fixtures import SMA_CLOSES, SMA_SYMBOL, write_sma_fixture
+from backend.fixtures import BACKTEST_SYMBOL, SMA_CLOSES, SMA_SYMBOL, write_backtest_fixture, write_sma_fixture
 from backend.recorder import PROJECT_ROOT
 
 API = "http://127.0.0.1:8000"
@@ -48,6 +52,18 @@ UI = "http://127.0.0.1:5173"
 AUTO = "TESTAUTO"
 T0 = datetime(2026, 11, 16, 15, 0, tzinfo=timezone.utc)      # test-clock base for check 3 (a Monday)
 APPROVE_BUY = "action=buy,crossover=up,evidence=sufficient,verdict=accept"
+# Check 4: hand calculation for TESTBT, SMA(2)/SMA(4), $1,000, fill at the next candle's open, whole shares, no fees.
+# (signal close, side, status, fill open-of, qty, price, cash after, shares after, realized after) as shown on screen
+BACKTEST_ORDERS = [
+    ("2026-11-09 15:05Z", "buy", "filled", "2026-11-09 15:06Z", "48", "$20.50", "$16.00", "48", "$0.00"),
+    ("2026-11-09 15:08Z", "sell", "filled", "2026-11-09 15:09Z", "48", "$21.00", "$1,024.00", "0", "$24.00"),
+    ("2026-11-09 15:11Z", "buy", "filled", "2026-11-09 15:12Z", "47", "$21.50", "$13.50", "47", "$24.00"),
+    ("2026-11-09 15:13Z", "sell", "filled", "2026-11-09 15:14Z", "47", "$18.50", "$883.00", "0", "-$117.00"),
+    ("2026-11-09 15:16Z", "buy", "filled", "2026-11-09 15:17Z", "39", "$22.50", "$5.50", "39", "-$117.00"),
+]
+BACKTEST_TILES = {"bt-final-equity": "$941.50", "bt-return": "-5.85%", "bt-buyhold": "+20.00%",
+                  "bt-drawdown": "-23.26%", "bt-trips": "1 / 2 won", "bt-realized": "-$117.00",
+                  "bt-unrealized": "$58.50"}
 
 
 class SmokeFailure(Exception):
@@ -78,7 +94,8 @@ class Smoke:
         lines = [f"# SmokeTest {self.out.name}", "",
                  f"Result: **{'PASS' if not failed and not error else 'FAIL'}** "
                  f"({len(self.results) - len(failed)}/{len(self.results)} checks passed)", "",
-                 "Data: temporary SQLite DB with the labelled TESTSMA fixture; TESTAUTO test prices on a test clock. "
+                 "Data: temporary SQLite DB with the labelled TESTSMA and TESTBT fixtures; TESTAUTO test prices on a "
+                 "test clock. "
                  "Providers: Yahoo off, provider test double (mocked).", "",
                  "| Section | Check | Expected | Observed | Result |", "|---|---|---|---|---|"]
         for r in self.results:
@@ -93,6 +110,13 @@ class Smoke:
         return path
 
     # ------------------------------------------------------------------ processes
+    def backend_env(self) -> dict:
+        return {**os.environ, "MARKET_DB": str(self.db), "LIVE_FEED": "off", "TEST_FEED": "on",
+                "DECISIONS_PROVIDER": "test", "PAPER_ACCOUNT": "paper", "PAPER_STARTING_CASH": "1000",
+                "PAPER_TEST_ACCOUNT": "paper-test", "PAPER_TEST_STARTING_CASH": "1000", "PAPER_ORDER_SIZE": "1",
+                # Stubbed providers: no credentials reach the backend even if a local .env exists.
+                "ANTHROPIC_API_KEY": "", "OPENAI_API_KEY": "", "DECISIONS_TEST_ANSWERS": APPROVE_BUY}
+
     def start_services(self):
         for port in (8000, 5173):
             try:
@@ -102,11 +126,7 @@ class Smoke:
                 raise SmokeFailure(f"port {port} is already in use; stop the running server first")
             except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
                 pass
-        env = {**os.environ, "MARKET_DB": str(self.db), "LIVE_FEED": "off", "TEST_FEED": "on",
-               "DECISIONS_PROVIDER": "test", "PAPER_ACCOUNT": "paper", "PAPER_STARTING_CASH": "1000",
-               "PAPER_TEST_ACCOUNT": "paper-test", "PAPER_TEST_STARTING_CASH": "1000", "PAPER_ORDER_SIZE": "1",
-               # Stubbed providers: no credentials reach the backend even if a local .env exists.
-               "ANTHROPIC_API_KEY": "", "OPENAI_API_KEY": "", "DECISIONS_TEST_ANSWERS": APPROVE_BUY}
+        env = self.backend_env()
         backend_log = open(self.out / "backend.log", "w")
         self.procs.append(subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "backend.app:app", "--host", "127.0.0.1", "--port", "8000"],
@@ -307,31 +327,58 @@ class Smoke:
                                   "(SELECT count(*) FROM decisions)")[0]
         before = counts()
         page.get_by_test_id("img-cutoff").select_option("2026-11-09T15:04:00Z")
-        self.answers("stance=short")
+        self.clock(datetime(2026, 11, 9, 15, 5, 20, tzinfo=timezone.utc))   # 20 s after the cutoff completed
+        self.answers("chart_signal=long,chart_signal@p=wait:0.10;long:0.80;short:0.05;hold:0.03;exit:0.02")
         page.get_by_test_id("img-button").click()
         page.get_by_test_id("img-status").wait_for(timeout=20000)
         image_id = int(self.text("img-decision-id").lstrip("#"))
         # text_content: the stance is shown in capitals by CSS only; the element's text is the stored value
-        self.check(s, "stance on screen", "short", page.get_by_test_id("img-stance").text_content().strip())
+        self.check(s, "chart_signal on screen", "long", page.get_by_test_id("img-stance").text_content().strip())
         self.check(s, "status on screen", "decided", self.text("img-status"))
         self.check(s, "model call label", "MOCK (provider test double)", self.text("img-call-kind"))
         self.check(s, "no-trade notice on screen", True, self.text("img-no-trade").startswith("No trade placed"))
         self.check(s, "flowchart reached step 7", "done",
                    page.get_by_test_id("img-flow-step-7").get_attribute("data-state"))
-        stance, request, response, image_json = self.sql(
-            "SELECT stance, request_json, response_json, image_json FROM image_decisions WHERE id = ?", (image_id,))[0]
+        self.check(s, "decision label on screen (Prompt 16D)", ("long 80%", "· 80%"),
+                   (page.get_by_test_id("img-label").get_attribute("data-label"), self.text("img-chosen-prob")))
+        self.check(s, "probability bars in choice order, matched by value; source and check",
+                   (["long 80%", "short 5%", "hold 3%", "exit 2%", "wait 10%"], "test double (fixed)", "valid"),
+                   ([" ".join(el.inner_text().split())
+                     for el in page.get_by_test_id("img-probabilities").locator(".prob-row").all()],
+                    self.text("img-prob-source"), self.text("img-prob-check")))
+        self.check(s, "position context on screen (Prompt 16E)", "explicitly empty (0 shares)",
+                   self.text("img-position"))
+        stance, request, response, image_json, probs, prob_check, *position = self.sql(
+            "SELECT stance, request_json, response_json, image_json, probabilities_json, probabilities_check, "
+            "position_state, position_direction, position_shares FROM image_decisions WHERE id = ?", (image_id,))[0]
         request, response, image = json.loads(request), json.loads(response), json.loads(image_json)
-        self.check(s, "SQLite stance", "short", stance)
-        self.check(s, "message parts sent (no snapshot JSON)", ["input_text", "input_image"],
+        self.check(s, "SQLite answer", "long", stance)
+        self.check(s, "SQLite probabilities (excerpt shape) and check",
+                   ([{"value": "wait", "probability": 0.1}, {"value": "long", "probability": 0.8},
+                     {"value": "short", "probability": 0.05}, {"value": "hold", "probability": 0.03},
+                     {"value": "exit", "probability": 0.02}], "valid"), (json.loads(probs), prob_check))
+        self.check(s, "SQLite position context (state, direction, shares)", ["empty", None, 0], position)
+        self.check(s, "choices asked", ["long", "short", "hold", "exit", "wait"],
+                   [c["value"] for c in request["questions"][0]["choices"]])
+        self.check(s, "question asked", "chart_signal", request["questions"][0]["name"])
+        self.check(s, "message parts sent (no snapshot JSON)", ["input_text", "input_text", "input_image"],
                    [part["type"] for part in request["input"][1]["content"]])
+        self.check(s, "context sent: capture time, not stale", True,
+                   request["input"][1]["content"][0]["text"].startswith(
+                       "Capture time: 2026-11-09T15:05:20.000Z (UTC). Chart interval: 1m. Context: not stale."))
+        self.check(s, "position context sent (explicitly empty)", True, request["input"][1]["content"][0]["text"]
+                   .endswith("position exists = no; the position is explicitly empty."))
+        self.check(s, "capture time and staleness on screen", ("2026-11-09 15:05:20.000 UTC", "not stale"),
+                   (self.text("img-capture-time"), self.text("img-stale")))
+        self.check(s, "Python's expected answer and the comparison on screen", ("long", "match"),
+                   (self.text("img-python-signal"), self.text("img-signal-check")))
         self.check(s, "test double saw no snapshot data", {"snapshot_id": None, "symbol": None, "candle_time": None},
                    response["received_snapshot"])
         self.check(s, "received PNG = stored capture (sha256)", image["sha256"],
                    response["received_images"][0]["sha256"])
-        self.check(s, "Python crossover shown for comparison", True, " up " in f" {self.text('img-compare')} ")
         markers = self.api("GET", f"/api/image-decisions?symbol={SMA_SYMBOL}&timeframe=1m")["image_decisions"]
-        self.check(s, "chart marker source (candle, stance)", [("2026-11-09T15:04:00Z", "short")],
-                   [(m["candle_time"], m["stance"]) for m in markers])
+        self.check(s, "chart marker source (candle, answer, label)", [("2026-11-09T15:04:00Z", "long", "long 80%")],
+                   [(m["candle_time"], m["stance"], m["label"]) for m in markers])
         self.check(s, "orders, fills and decisions unchanged", before, counts())
         # a provider timeout: shown on screen, stored, no new marker
         self.answers("fail=timeout")
@@ -340,8 +387,9 @@ class Smoke:
         self.check(s, "timeout shown in the flowchart (model step failed)", "failed",
                    page.get_by_test_id("img-flow-step-5").get_attribute("data-state"))
         markers = self.api("GET", f"/api/image-decisions?symbol={SMA_SYMBOL}&timeframe=1m")["image_decisions"]
-        self.check(s, "no marker from the timeout", ["short"], [m["stance"] for m in markers])
+        self.check(s, "no marker from the timeout", ["long"], [m["stance"] for m in markers])
         self.check(s, "orders, fills and decisions unchanged after the timeout", before, counts())
+        self.api("POST", "/api/test/clock", {"time": None})                 # release the test clock
 
     # ------------------------------------------------------------------ check 3
     def at(self, minute: int, second: int) -> datetime:
@@ -470,6 +518,42 @@ class Smoke:
                     ["runs"] if r["candle_ts"] >= self.candle(9)])
         self.check(s, "after Stop: no new order", orders_before, self.sql("SELECT count(*) FROM paper_orders")[0][0])
 
+    # ------------------------------------------------------------------ check 4
+    def check_backtest(self):
+        s = "4 backtest"
+        page = self.page
+        # Seeded here, not at start-up, so check 1's replay still defaults to the TESTSMA session.
+        write_backtest_fixture(self.db, keep=True)
+        page.goto(f"{UI}/?symbol={BACKTEST_SYMBOL}&interval=1m")
+        page.get_by_test_id("bt-short").fill("2")
+        page.get_by_test_id("bt-long").fill("4")
+        page.get_by_test_id("bt-cash").fill("1000")
+        page.get_by_test_id("bt-run").click()
+        self.check(s, "final equity on screen", "$941.50", self.wait_text("bt-final-equity", "$941.50"))
+        self.check(s, "summary tiles", BACKTEST_TILES, {t: self.text(t) for t in BACKTEST_TILES})
+        rows = page.get_by_test_id("bt-orders").locator("tbody tr")
+        shown = []
+        for i in range(rows.count()):
+            cells = [c.strip() for c in rows.nth(i).locator("td").all_inner_texts()]
+            shown.append((cells[1], cells[3], cells[4].split(" ·")[0], *cells[5:]))
+        self.check(s, "orders and fills on screen", BACKTEST_ORDERS, shown)
+        self.check(s, "data labelled TEST", True, "TEST" in self.text("bt-source"))
+        self.check(s, "uncertainty statements shown", True, len(page.get_by_test_id("bt-uncertain")
+                                                                .locator("li").all_inner_texts()) >= 4)
+        run = self.sql("SELECT id, short, long, data_labels, candle_count, final_equity_micros, realized_micros, "
+                       "unrealized_micros, final_shares, round_trips, wins FROM backtest_runs "
+                       "WHERE symbol = ? ORDER BY id DESC LIMIT 1", (BACKTEST_SYMBOL,))
+        self.check(s, "stored run (SQLite)", [(2, 4, "test", 18, 941_500_000, -117_000_000, 58_500_000, 39, 2, 1)],
+                   [r[1:] for r in run])
+        fills = self.sql("SELECT side, status, quantity, price_micros, cash_after_micros FROM backtest_fills "
+                         "WHERE run_id = ? ORDER BY seq", (run[0][0],)) if run else []
+        self.check(s, "stored fills (SQLite)",
+                   [("buy", "filled", 48, 20_500_000, 16_000_000), ("sell", "filled", 48, 21_000_000, 1_024_000_000),
+                    ("buy", "filled", 47, 21_500_000, 13_500_000), ("sell", "filled", 47, 18_500_000, 883_000_000),
+                    ("buy", "filled", 39, 22_500_000, 5_500_000)], fills)
+        self.check(s, "backtest left the paper account alone (no paper fill for TESTBT)", 0,
+                   self.sql("SELECT count(*) FROM paper_fills WHERE symbol = ?", (BACKTEST_SYMBOL,))[0][0])
+
     # ------------------------------------------------------------------ run
     def run(self) -> int:
         error = None
@@ -487,7 +571,7 @@ class Smoke:
             console = open(self.out / "browser-console.log", "w")
             self.page.on("console", lambda m: console.write(f"{m.type}: {m.text}\n"))
             for step in (self.check_replay_sma, self.check_ask_about_chart, self.check_image_decision,
-                         self.check_automation):
+                         self.check_automation, self.check_backtest):
                 print(f"- {step.__name__}", flush=True)
                 step()
         except Exception as exc:

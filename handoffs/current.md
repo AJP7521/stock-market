@@ -1,56 +1,39 @@
-# Current state: 2026-11-13
+# Current state: 2026-11-19
 
-**Last prompt:** 14 · Workstation SmokeTest (complete and committed). All prompts in `prompts/` (01–14, with 07a and
-09a–09d, 10a) are committed. Latest commit `290e1f0` (records the live microphone release for Prompt 13).
+**Last prompt:** 17 · Backtest the SMA crossover strategy (`prompts/17-backtest-sma-crossover.md`), done and
+verified, **not committed**. Latest commit is still `69f9a3e` (Prompt 16). Prompts 16A–16F were already
+uncommitted at the start of this session and are still uncommitted.
 
-## Files created or changed
-`git status`: clean — nothing uncommitted. This session's commits:
+## Files created or changed (`git status`)
+Prompt 17 (this session):
+- new: `backend/backtest.py`, `backend/tests/test_backtest.py`, `frontend/src/BacktestPanel.vue`,
+  `prompts/17-backtest-sma-crossover.md`
+- changed: `backend/pnl.py` (`apply_fill` extracted, same behaviour), `backend/fixtures.py` (TESTBT, SYNTHBT,
+  `--keep`), `backend/app.py` (`/api/backtests*`), `backend/smoke.py` (check 4), `frontend/src/App.vue` (panel
+  mounted), `.claude/launch.json` (`backend-backtest-demo`), `README.md` (Backtest and Simulation assumptions
+  sections, SmokeTest), `docs/design-pipeline.md` (components, three new tables), `docs/verification.md`,
+  this file
 
-| Commit | Prompt | Main files |
-|---|---|---|
-| `338df1b` | 10 Decision API | `backend/decisions.py`, `series.py`, `settings.py`, `.env.example`, `requirements.txt` (`anthropic==2.8.0`) |
-| `84eff64` | 10A Ask about chart | `backend/chart_images.py`, `frontend/src/AskChartPanel.vue`, `CandleChart.vue` (`capture()`) |
-| `f778a41` | 11 Agent review | `backend/review.py` |
-| `ab49e95` | 12 Paper automation | `backend/automation.py`, `backend/paper.py` (decision_id, pre-fill hooks), `frontend/src/AutomationPanel.vue` |
-| `8e646c6`, `290e1f0` | 13 Voice | `backend/voice.py`, `frontend/src/VoicePanel.vue` |
-| `6b42471` | 14 SmokeTest | `backend/smoke.py`, `backend/requirements-dev.txt` (`playwright==1.65.1`), `.github/workflows/smoke.yml` |
+Already uncommitted from Prompts 16A–16F (not touched except where listed above): `backend/decisions.py`,
+`image_decisions.py`, `compare_chart_signal.py`, `tests/test_image_decisions.py`, the other `frontend/src/*Panel.vue`
+files, `chartAdapter.js`, `backend.js`, `prompts/16a…16f`.
 
-Each prompt also updated `README.md`, `docs/design-pipeline.md`, `docs/verification.md` and its tests in
-`backend/tests/`. Local only (ignored): `.env` with `DECISIONS_PROVIDER=claude` and `ANTHROPIC_API_KEY`;
-`test-results/` (SmokeTest reports).
+Local only (ignored): `backend/data/test-backtest.sqlite` (TESTBT + SYNTHBT demo data, with a few saved runs).
 
-Installed in system Python 3.14 (student-approved): `anthropic` 2.8.0, `playwright` 1.65.1 (+ greenlet 3.5.6).
+## Checks run
+| Check | Result |
+|---|---|
+| `python3 -m unittest discover -s backend/tests -t .` | **145 tests, OK** |
+| API + browser pane on TESTBT and SYNTHBT | as expected (hand table); one formatting bug fixed (`$-1.17`) |
+| `npm --prefix frontend run build` | built |
+| `python3 -m backend.smoke` | run 1 FAIL (TESTBT seeded too early broke the check 1 replay default); AutoLoop cycle 1 fixed it; run 2 **PASS 82/82** (`smoke-20261119-214245`) |
 
-## Decisions made with the student
-- **Provider:** Claude (`claude-opus-5-5`) is the default; OpenAI stays optional (`DECISIONS_PROVIDER=openai`) and
-  has never been called live (no OpenAI key).
-- **Voice (Prompt 13):** the Claude API has no audio, so speech uses the browser's Web Speech API in Google Chrome
-  instead of GPT-Live WebRTC. Recorded as a deviation; Chrome sends speech audio to Google.
-- **Automation on test data** trades only in the disposable `paper-test` account.
-
-## Checks performed (latest results)
-| Check | Command | Result |
-|---|---|---|
-| Unit tests | `python3 -m unittest discover -s backend/tests -t .` | **118 tests, OK** (8 added by the requirements audit) |
-| SmokeTest | `python3 -m backend.smoke` | **PASS 48/48** twice in a row (`smoke-20261112-230417`, `-230450`), clean account each time; earlier runs 1–2 failed on test-side issues, fixed by AutoLoop cycles 1–2 |
-| Live Claude decision | Prompt 10 | buy on TESTSMA test data, matched SQLite |
-| Live Claude image + review | Prompts 10A, 11 | buy / up / sufficient; reviewer accept; matched SQLite |
-| Live voice | Prompt 13, student's Chrome | answers for decision 3 (filled) and 5 (vetoed) matched SQLite; microphone icon went away after End voice |
-| GitHub Actions | push to `AJP7521/stock-market` (public) | **success**: 110 unit tests OK, SmokeTest 48/48 (run 43363805347) |
-
-No services are running (ports 8000 and 5173 free).
-
-## Outstanding questions
-- **GitHub:** `origin` = https://github.com/AJP7521/stock-market (public, chosen by the student); `main` pushed.
-  The SmokeTest workflow runs on every push.
-- **Pre-existing:** two simultaneous first connections to a brand-new database can fail once with
-  "database is locked" (`recorder.connect`, `PRAGMA journal_mode=WAL`). Seen once at start-up in Prompt 12; it did not
-  affect any check. Fixing it is a small scoped change if wanted.
-- **Requirements audit (2026-11-13):** schema, duplicate/revision/out-of-order docs and tests, and an unrequested
-  feed-drop test were added. Remaining: re-run the live Yahoo path check during market hours (9:30–16:00 ET).
-- Not exercised: a live OpenAI call, a real microphone-permission denial in Chrome (mocked only), automation on live
-  Yahoo data, live provider timeouts/refusals (mocked only).
+## Waiting on the student
+- Review `git status` / `git diff`, then decide whether to commit Prompt 17 (and whether to commit 16A–16F with it
+  or separately).
+- Known, unchanged: two HTTP 500s "duplicate column name: decision_id" can appear on the first load of a brand-new
+  database (race in `paper.ensure_schema`). Fixing it is a separate small task.
 
 ## Next task
-No prompts remain in `prompts/`. Suggested single next task: during market hours, re-run the live Yahoo check
-(observation → SQLite → chart, feed status and age, disconnect/reconnect) and record it in `docs/verification.md`.
+Commit after review. Then, optionally: run a backtest on recorded live Yahoo data and record it as a live
+observation in `docs/verification.md`, kept separate from the test-data checks.

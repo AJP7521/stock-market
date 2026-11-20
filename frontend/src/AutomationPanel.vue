@@ -6,6 +6,7 @@
 // Stop disables new executions, including a model reply still pending. Trace follows one decision ID end to end.
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import CandleChart from './CandleChart.vue'
+import { backendFetch, createPoller } from './backend.js'
 
 const props = defineProps({
   symbol: { type: String, required: true },
@@ -23,7 +24,6 @@ const previewRef = ref(null)
 const trace = ref(null)
 const orderSize = ref(1)          // shares for buy and sell while running (close sells the whole position)
 const attempted = new Set()       // candles this page already tried (the backend also deduplicates)
-let timer = null
 let working = false
 
 const params = computed(() => ({ symbol: props.symbol, timeframe: props.timeframe, short: props.smaShort, long: props.smaLong }))
@@ -33,14 +33,14 @@ const money = (v) => (v === null || v === undefined ? '—'
 const utc = (iso) => (iso ? iso.replace('T', ' ').replace(/:00(\.000)?Z$/, ' UTC').replace(/Z$/, ' UTC') : '—')
 
 async function post(url, body) {
-  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const res = await backendFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   const data = await res.json()
   if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail))
   return data
 }
 
 async function refresh() {
-  const res = await fetch(`/api/automation/status?${new URLSearchParams(params.value)}`)
+  const res = await backendFetch(`/api/automation/status?${new URLSearchParams(params.value)}`)
   if (res.ok) view.value = await res.json()
 }
 
@@ -59,7 +59,7 @@ async function stop() {
 async function tick() {
   await refresh()
   if (!running.value || working) return
-  const res = await fetch(`/api/history?${new URLSearchParams({ symbol: props.symbol, timeframe: props.timeframe })}`)
+  const res = await backendFetch(`/api/history?${new URLSearchParams({ symbol: props.symbol, timeframe: props.timeframe })}`)
   if (!res.ok) return
   const body = await res.json()
   // Every candle that completed after Start and has no run yet, oldest first (the backend also deduplicates).
@@ -105,7 +105,7 @@ async function analyse(candleTime) {
     ])
     if (!png || !png.startsWith('data:image/png;base64,')) throw new Error('the chart export returned no PNG')
   } catch (e) {
-    await post(`/api/automation/runs/${run.id}/fail`, { reason: e.message })
+    await post(`/api/automation/runs/${run.id}/fail`, { reason: e.message }).catch((err) => { message.value = err.message })
     return
   }
   busy.value = `Analyst and reviewer for ${utc(candleTime)}…`
@@ -117,8 +117,12 @@ async function analyse(candleTime) {
 }
 
 async function showTrace(decisionId) {
-  const res = await fetch(`/api/automation/trace/${decisionId}`)
-  trace.value = res.ok ? await res.json() : null
+  try {
+    const res = await backendFetch(`/api/automation/trace/${decisionId}`)
+    trace.value = res.ok ? await res.json() : null
+  } catch (e) {
+    message.value = `Trace not loaded: ${e.message}`
+  }
 }
 
 function outcome(r) {
@@ -127,14 +131,19 @@ function outcome(r) {
   return r.status.replace('_', ' ')
 }
 
-onMounted(() => { refresh(); timer = setInterval(tick, 2000) })
-onBeforeUnmount(() => clearInterval(timer))
-watch(params, () => { attempted.clear(); trace.value = null; refresh() })
+// Every 2 s, less often while the backend is unreachable.
+const poller = createPoller(tick, 2000)
+const offline = poller.offline
+onMounted(() => poller.start())
+onBeforeUnmount(() => poller.stop())
+watch(params, () => { attempted.clear(); trace.value = null; poller.now() })
 </script>
 
 <template>
   <section class="auto card" data-testid="automation">
     <h2>Paper automation (analyst + reviewer → paper account)</h2>
+    <p v-if="offline" class="bad" data-testid="auto-offline">Backend unreachable: showing the last state received;
+      retrying less often until it answers.</p>
     <div class="controls">
       <label>Order size
         <input v-model.number="orderSize" type="number" min="1" step="1" :disabled="running" style="width:4em"

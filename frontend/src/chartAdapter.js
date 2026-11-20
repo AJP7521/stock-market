@@ -89,17 +89,25 @@ export function toIndicatorLines(indicators) {
 }
 
 /**
- * Markers for image-only chart decisions (Prompt 16): the model's stance at its cutoff candle.
- * long: green arrow below the bar; short: red arrow above; wait: grey circle above. A view, never a trade.
+ * Markers for image-only chart decisions (Prompts 16, 16E): the model's answer at its cutoff candle, one style per
+ * value. A view of the chart, never a trade. Unknown values fall back to the wait style.
+ *   long  green arrow up, below the bar      short  red arrow down, above the bar
+ *   hold  blue square, below the bar          exit   amber square, above the bar
+ *   wait  grey circle, above the bar
  */
 const WAIT = '#6b7280'
+export const STANCE_STYLES = {
+  long: { position: 'belowBar', shape: 'arrowUp', color: UP },
+  short: { position: 'aboveBar', shape: 'arrowDown', color: DOWN },
+  hold: { position: 'belowBar', shape: 'square', color: SHORT },
+  exit: { position: 'aboveBar', shape: 'square', color: '#b26b00' },
+  wait: { position: 'aboveBar', shape: 'circle', color: WAIT },
+}
 export function toStanceMarkers(decisions) {
   return (decisions ?? []).map((d) => ({
     time: toChartTime(d.candle_time),
-    position: d.stance === 'long' ? 'belowBar' : 'aboveBar',
-    shape: d.stance === 'long' ? 'arrowUp' : d.stance === 'short' ? 'arrowDown' : 'circle',
-    color: d.stance === 'long' ? UP : d.stance === 'short' ? DOWN : WAIT,
-    text: `Claude: ${d.stance}`,
+    ...(STANCE_STYLES[d.stance] ?? STANCE_STYLES.wait),
+    text: `Claude: ${d.label ?? d.stance}`,   // e.g. "Claude: hold 70%" (model-estimated, Prompt 16D)
   }))
 }
 

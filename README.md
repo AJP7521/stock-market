@@ -13,6 +13,7 @@ The finished workstation should let a student:
 - view candles, volume and indicators (SMAs, rolling range) on an interactive chart,
   live or in replay
 - trade a local, long-only **paper** account and read its realized/unrealized P&L
+- backtest the SMA crossover rule on stored candles (no look-ahead) and read its trades, performance and limits
 - ask an AI analyst about a chart snapshot, have a second agent review the proposal,
   and optionally apply approved decisions to the paper account
 - discuss a recorded decision by voice
@@ -66,6 +67,7 @@ stock-market/
 |   |-- indicator_store.py    Named indicator instances stored in SQLite
 |   |-- paper.py              Long-only paper account: one execution function, next-price fills
 |   |-- pnl.py                P&L history: weighted average cost, fills and candle valuations
+|   |-- backtest.py           SMA crossover backtest: next-open fills, stored runs, interpretation
 |   |-- fixtures.py           Labelled test fixtures in a separate SQLite file
 |   |-- candles.py            One-minute candles from stored observations
 |   |-- timeframes.py         5m/15m/1h/1d candles from one-minute candles
@@ -168,6 +170,71 @@ MARKET_DB=/tmp/paper-demo.sqlite LIVE_FEED=off TEST_FEED=on python3 -m uvicorn b
 ```bash
 curl -X POST http://127.0.0.1:8000/api/test/observations -H 'Content-Type: application/json' -d '{"symbol":"TESTPAPER","price":100}'
 ```
+
+### Backtest (SMA crossover rule, simulated)
+
+The **Backtest · SMA crossover** panel (below the chart, live and replay) runs a fixed rule on the candles stored for
+the chart's symbol and timeframe: an upward crossover while flat buys, a downward crossover while holding sells the
+whole position. Set Short, Long and Starting cash and click **Run backtest**. Python walks the completed candles in
+time order; at each candle the decision sees only the candles completed so far, and the order fills at the **next
+candle's open**. Each run is saved in SQLite and can be reopened from **Earlier runs**.
+
+The panel shows:
+- final equity, return, **buy and hold** over the same candles, max drawdown, round trips won, realized and unrealized
+  P&L
+- the equity at each close with buy and sell markers
+- every order and fill (signal candle, fill candle, quantity, price, cash, shares, realized P&L after)
+- the round trips
+- **What this result establishes** and **What it leaves uncertain**, written from the run's own numbers
+
+The data source is shown with every run; test and synthetic data are labelled. To try it without the live feed:
+
+```bash
+python3 -m backend.fixtures backtest
+```
+
+```bash
+python3 -m backend.fixtures synthetic --db backend/data/test-backtest.sqlite --keep
+```
+
+```bash
+MARKET_DB=backend/data/test-backtest.sqlite LIVE_FEED=off python3 -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
+```
+
+Then open `http://127.0.0.1:5173/?symbol=TESTBT&interval=1m` (18 hand-calculated candles; SMA 2/4 gives
+$941.50, −5.85%, against +20% for buy and hold) or `?symbol=SYNTHBT&interval=5m` (two synthetic sessions). The same
+run as JSON:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/backtests -H 'Content-Type: application/json' -d '{"symbol":"TESTBT","timeframe":"1m","short":2,"long":4,"starting_cash":1000}'
+```
+
+`GET /api/backtests?symbol=TESTBT` lists the saved runs; `GET /api/backtests/{id}` returns one with its orders,
+equity curve, round trips and interpretation.
+
+**What a backtest establishes:** how this exact rule would have traded these exact candles, with no look-ahead,
+under the assumptions below, and how that compares with buy and hold. **What it leaves uncertain:** whether the
+result is more than chance (few trades), whether it holds for other symbols, periods or windows (the windows were
+chosen, not tested on held-back data), how real fees, slippage and spreads would change it, and what an open final
+position will be worth. Test and synthetic data say nothing about real markets. Past simulated results do not predict
+future results.
+
+### Simulation assumptions (paper account and backtest)
+
+| | Paper account (manual and automation) | Backtest |
+|---|---|---|
+| Who decides | you (buttons) or the reviewed AI decision | fixed SMA crossover rule |
+| Information used | the price at the moment of the order | only candles completed by the decision time |
+| Fill price | next observed price after the order | open of the next completed candle (an overnight gap counts) |
+| Quantity | whole shares you enter (`PAPER_ORDER_SIZE` for automation); close = whole position | as many whole shares as cash allows; sell = whole position |
+| Unfillable | rejected at fill if cash or shares no longer suffice | buy rejected if cash buys no share; a signal on the last candle stays "not filled" |
+| Costs | zero fees and commissions | zero fees and commissions |
+| Not modelled | slippage, bid/ask spread, partial fills, market impact, short selling, margin, dividends, splits, interest on cash | the same |
+| P&L | weighted average cost (`pnl.apply_fill`); realized on sales, unrealized = shares × price − cost basis | the same function; open position valued at the last close, not sold |
+| Valuation price | fill price, then each completed one-minute candle's close | each candle's close |
+| Money | integer micro-dollars (1e-6 USD) | the same |
+
+Market hours are not enforced for test data. All money and trades are simulated; nothing reaches a broker.
 
 ### Decisions (model proposal about one completed candle)
 
@@ -278,23 +345,67 @@ no verdict, so add `DECISIONS_TEST_ANSWERS=action=buy,crossover=up,evidence=suff
 accepted review. Leave out `DECISIONS_PROVIDER=test` to
 ask Claude.
 
-### Chart-only decision (image → long, short or wait)
+### Chart-only decision (image → long, short, hold, exit or wait)
 
-The **Chart-only decision** panel sends Claude **only a picture of the chart**, not the candle data, and shows its
-stance: **long**, **short** or **wait**. Pick a completed cutoff candle and click **Send chart image**. The panel
-freezes a snapshot, draws it off screen, captures the PNG and posts it to `POST /api/image-decisions`. The backend
-checks the PNG, stores it and sends the model the image with fixed instructions only. The symbol, prices, SMA values,
-the Python crossover and the paper account stay on the server.
+The **Chart-only decision** panel sends Claude **only a picture of the chart**, not the candle data, and asks one
+question, `chart_signal` (Prompt 16E). It compares the newer of the last two completed closes with the preceding
+close, together with the **position context**:
 
-The stance is a view of the chart for learning. **No trade is placed**: the simulator stays long-only, the paper
-account is never written, and these results are never eligible for execution. Each decided stance also appears as a
-marker on the main chart at its candle (long ▲ green, short ▼ red, wait ● grey), reloaded from SQLite
+| Position | Newer close vs preceding | Answer |
+|---|---|---|
+| explicitly empty | higher / lower | **long** / **short** |
+| open long | higher / lower | **hold** / **exit** |
+| open short (never happens: the simulator is long-only) | lower / higher | **hold** / **exit** |
+| any | equal | **wait** |
+| missing or unknown, or the chart is stale or unclear | any | **wait** (takes priority) |
+
+The position context is application-defined, not a Decision API field: it comes from the main paper account's
+shares at the decision time (0 → explicitly empty, more than 0 → open long, account missing → unknown) and is sent as
+"position exists" and "direction" only, never the share count or cash. Pick a completed cutoff candle and click
+**Send chart image**. The panel freezes a
+snapshot, draws it off screen, captures the PNG and posts it to `POST /api/image-decisions`. The backend checks the
+PNG, stores it and sends the model the image, fixed instructions and one context line: the capture time (the backend
+clock when the image arrives), the interval, and whether the chart is stale (the cutoff candle completed more than one
+interval before the capture time). The symbol, prices, opens and closes, SMA values and the paper account stay on the
+server. Python applies the same rule to the snapshot's last two completed candles and the panel shows its answer
+next to Claude's as a **match** or a **CONFLICT**.
+
+Claude also gives its **own estimate** of the probability of each answer (the Claude API returns no measured
+probabilities). The backend stores them in the shape `probabilities: [{value, probability}]`, checks that there is one
+per answer, each from 0 to 1, adding up to 1 (within 0.02), and the panel shows them as bars marked
+**model-estimated**. The decision label is the answer with its estimate, e.g. **SHORT · 55%**, and the chart marker
+reads `Claude: short 55%`. Missing or invalid estimates are shown with the reason and never as a percentage.
+
+The answer is a chart-reading exercise. **No trade is placed**: the simulator stays long-only, the paper
+account is never written, and these results are never eligible for execution. Each decided answer also appears as a
+marker on the main chart at its candle (long ▲ green below, short ▼ red above, hold ■ blue below, exit ■ amber
+above, wait ● grey above), reloaded from SQLite
 (`GET /api/image-decisions?symbol=…&timeframe=…`). A flowchart in the panel shows which part (Vue, FastAPI, SQLite,
 Claude) does each step and lights up the active step. Results are stored in the `image_decisions` table; the PNG is
 served at `GET /api/image-decisions/{id}/image`.
 
 With the provider test double (`DECISIONS_PROVIDER=test`, as in the Ask about chart example above), the default
-answer is `stance=long` and the result is labelled **MOCK (provider test double)**.
+answer is `chart_signal=long` and the result is labelled **MOCK (provider test double)**.
+
+#### Compare chart_signal scenarios (test data)
+
+```bash
+python3 -m backend.compare_chart_signal
+```
+
+```bash
+python3 -m backend.compare_chart_signal --live
+```
+
+Runs 16 scenarios (clear up, clear down, a red candle that closes higher, a green candle that closes level × an
+explicitly empty, long, short or unknown position) through the real panel on a temporary database with the labelled
+TESTSIG fixture. The position comes from a test-only override (`POST /api/test/position`, `TEST_FEED=on` only), never
+from your paper account. For each scenario it checks that the question sent equals the approved JSON in
+`prompts/16e-position-aware-chart-signal.md`, that the context names the position, and that the answer, label,
+position and Python's answer on screen equal SQLite. The first form uses the provider test double; `--live` asks
+Claude (about 16 calls) and records whether each answer matches the rule. `--evidence up,down,mixed-higher,mixed-equal`
+runs a subset. Reports and one screenshot per scenario go to `test-results/compare-<time>/`. Ports 8000 and 5173
+must be free. On macOS, prefix it with `caffeinate -dimsu` so the computer does not sleep during the run.
 
 ### Configurable indicators
 
@@ -437,15 +548,17 @@ Run it (ports 8000 and 5173 must be free):
 python3 -m backend.smoke
 ```
 
-It creates a fresh temporary database with the labelled TESTSMA fixture, starts FastAPI (`LIVE_FEED=off`,
+It creates a fresh temporary database with the labelled TESTSMA fixture (check 4 adds TESTBT), starts FastAPI (`LIVE_FEED=off`,
 `DECISIONS_PROVIDER=test`, `TEST_FEED=on`, no API keys) and Vite, waits for both, and drives headless Chrome through:
 (1) replaying the recorded session, adding an SMA, changing its window and comparing with a hand calculation;
 (2) Ask about chart: a decodable PNG with the right symbol and candle at the model boundary, known answers on screen,
-no fill, then a provider failure on screen; (2b) the chart-only decision: only text and the PNG reach the model,
-the stance on screen matches SQLite and the marker list, no order, fill or decision is added, then a timeout on
+no fill, then a provider failure on screen; (2b) the chart-only decision: only the context text and the PNG reach the model,
+the answer on screen matches SQLite, Python's expected answer and the marker list, no order, fill or decision is added, then a timeout on
 screen; (3) paper automation on a test clock: buy 4 @ $100, sell 1 @ $110, close
 3 @ $105 → $1,025, 0 shares, $25 realized, $0 unrealized, with a veto, a duplicate and a candle after Stop adding no
-fill or order. It exits 1 if any expected result is missing, writes `test-results/smoke-<time>/report.md` (plus a
+fill or order; (4) a backtest of the labelled TESTBT fixture with SMA 2/4: the summary tiles, the five orders and
+fills, and the stored `backtest_runs` / `backtest_fills` rows match a hand calculation ($941.50, −5.85%, buy and hold
++20%, drawdown 23.26%), and the paper account is untouched. It exits 1 if any expected result is missing, writes `test-results/smoke-<time>/report.md` (plus a
 screenshot, logs and the database on failure), and stops the browser and every process it started, also on failure.
 `SMOKE_HEADED=1` shows the browser; `SMOKE_BROWSER_CHANNEL=` (empty) uses Playwright's own Chromium instead of Chrome.
 GitHub Actions runs the same command on every push (`.github/workflows/smoke.yml`), offline, without credentials.

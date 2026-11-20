@@ -46,11 +46,11 @@ const STEPS = [
   { lane: 'browser', title: 'Draw and capture the chart', part: 'Lightweight Charts → PNG',
     carries: 'PNG + snapshot ID → POST /api/image-decisions' },
   { lane: 'server', title: 'Check and store the PNG', part: 'FastAPI → captures/ folder',
-    carries: 'the PNG only: no symbol, prices, SMA values or account' },
-  { lane: 'model', title: 'Look at the image', part: 'Claude (vision)',
+    carries: 'the PNG + capture time, interval, stale flag, position context: no symbol, prices, SMA values, cash or share count' },
+  { lane: 'model', title: 'Read the last two completed candles', part: 'Claude (vision) · question chart_signal',
     carries: 'one answer: long, short or wait' },
-  { lane: 'server', title: 'Validate and save', part: 'FastAPI → SQLite image_decisions',
-    carries: 'the stance and its record → browser' },
+  { lane: 'server', title: 'Validate, compare and save', part: 'FastAPI: Python applies the same rule → SQLite',
+    carries: 'the answer, Python\'s expected answer and the record → browser' },
   { lane: 'browser', title: 'Show the stance and a marker', part: 'Vue panel + chart marker',
     carries: 'nothing: no order, paper account untouched' },
 ]
@@ -136,19 +136,54 @@ async function ask() {
 }
 
 const busy = computed(() => step.value > 0)
-const stanceClass = computed(() => ({ long: 'ok', short: 'bad', wait: 'muted' })[result.value?.stance] ?? '')
+const pct = (v) => `${Math.round(v * 100)}%`
+// One bar per choice of the question asked, in its order, each matched to its estimate BY VALUE (Prompt 16E); values
+// the question does not list are added at the end. Missing, out-of-range or non-numeric values are text, never drawn.
+const probRows = computed(() => {
+  const list = result.value?.probabilities ?? []
+  if (!list.length) return []
+  const asked = (question.value?.choices ?? []).map((c) => c.value)
+  const values = [...asked, ...list.map((p) => p.value).filter((v) => !asked.includes(v))]
+  return values.map((value) => {
+    const raw = list.find((p) => p.value === value)?.probability
+    const n = typeof raw === 'number' && raw >= 0 && raw <= 1 ? raw : null
+    return { value, width: n === null ? '0%' : `${n * 100}%`, text: n === null ? String(raw ?? 'missing') : pct(n) }
+  })
+})
+const stanceClass = computed(() => ({ long: 'ok', short: 'bad', hold: 'info', exit: 'warn', wait: 'muted' })[result.value?.stance] ?? '')
+// Position context as sent (application-defined; from the frozen snapshot's paper account)
+const positionText = computed(() => {
+  const p = result.value?.position
+  if (!p) return 'not recorded'
+  const test = p.source === 'TEST override'
+  if (p.state === 'empty') return `explicitly empty (${test ? 'TEST override' : '0 shares'})`
+  if (p.state === 'open') return `open, ${p.direction} (${test ? 'TEST override' : `${p.shares} shares`})`
+  return `unknown (${test ? 'TEST override' : 'paper account missing'})`
+})
 const sentText = computed(() => result.value?.request_sent?.input?.[1]?.content
   ?.filter((p) => p.type === 'input_text').map((p) => p.text).join(' ') ?? '')
 const instructions = computed(() => result.value?.request_sent?.input?.[0]?.content?.[0]?.text ?? '')
+const question = computed(() => result.value?.request_sent?.questions?.[0] ?? null)
+const matchText = computed(() => {
+  const r = result.value
+  if (!r || r.python_signal == null) return ''
+  if (r.stance == null) return `no answer; Python expected ${r.python_signal}`
+  return r.signal_match ? 'match' : 'CONFLICT'
+})
 const sentParts = computed(() => result.value?.request_sent?.input?.[1]?.content?.map((p) => p.type) ?? [])
 </script>
 
 <template>
   <section class="card image-decision" data-testid="image-decision">
-    <h2>Chart-only decision: long, short or wait</h2>
+    <h2>Chart-only decision: long, short, hold, exit or wait</h2>
     <p class="hint">
-      The model receives <strong>only the chart image</strong>, not the candle data. Its answer is a view of the
-      chart for learning: <strong>no trade is placed</strong> and the paper account is not changed.
+      The model receives <strong>only the chart image</strong> plus the capture time, whether the chart is stale, and
+      the <strong>position context</strong> (whether the paper account holds a position, and its direction), not the
+      candle data. It compares the newer of the <strong>last two completed closes</strong> with the preceding close:
+      with no position, higher is <strong>long</strong> and lower is <strong>short</strong>; with an open position, a
+      move in its direction is <strong>hold</strong> and against it is <strong>exit</strong>. Equal closes, a stale or
+      unclear chart, or an unknown position mean <strong>wait</strong>. The answer is a reading exercise:
+      <strong>no trade is placed</strong> and the paper account is not changed.
     </p>
     <form class="controls" @submit.prevent="ask">
       <label>
@@ -181,9 +216,10 @@ const sentParts = computed(() => result.value?.request_sent?.input?.[1]?.content
         </li>
       </ol>
       <figcaption class="hint">
-        Kept on the server and never sent to the model: symbol, prices, SMA values, the Python crossover and the
-        paper account. The backend uses them only to check that the image matches the snapshot and to compare
-        afterwards.
+        Kept on the server and never sent to the model: symbol, prices, opens and closes, SMA values, the Python
+        crossover and the paper account. The backend uses them only to check that the image matches the snapshot and
+        to apply the same rule itself, so the model's answer can be compared afterwards. Stale: the cutoff candle
+        completed more than one interval before the capture time.
       </figcaption>
     </figure>
 
@@ -208,10 +244,26 @@ const sentParts = computed(() => result.value?.request_sent?.input?.[1]?.content
       </figure>
 
       <div v-if="result" class="result" data-testid="img-result">
-        <p class="stance-line">
-          Stance
+        <p class="stance-line" data-testid="img-label" :data-label="result.label ?? ''">
+          chart_signal
           <strong class="stance" :class="stanceClass" data-testid="img-stance">{{ result.stance ?? 'none' }}</strong>
+          <span v-if="result.chosen_probability !== null" class="chosen-prob" data-testid="img-chosen-prob">
+            · {{ pct(result.chosen_probability) }}</span>
         </p>
+        <div v-if="result.probabilities_check" class="probs" data-testid="img-probabilities">
+          <p class="hint">
+            Probabilities: <strong data-testid="img-prob-source">{{ result.probabilities_source ?? 'none' }}</strong>
+            <template v-if="result.probabilities_source === 'model-estimated'"> (Claude's own estimate, not a measured
+              probability)</template> ·
+            check <strong data-testid="img-prob-check" :class="result.probabilities_check === 'valid' ? 'ok' : 'bad'">
+              {{ result.probabilities_check }}</strong>
+          </p>
+          <div v-for="p in probRows" :key="p.value" class="prob-row" :data-testid="`img-prob-${p.value}`">
+            <span class="prob-name" :class="{ chosen: p.value === result.stance }">{{ p.value }}</span>
+            <span class="prob-bar"><span :style="{ width: p.width }"></span></span>
+            <span class="prob-value">{{ p.text }}</span>
+          </div>
+        </div>
         <p class="hint">
           Image decision <span data-testid="img-decision-id">#{{ result.image_decision_id }}</span> ·
           status <strong data-testid="img-status">{{ result.status }}</strong> ·
@@ -221,16 +273,32 @@ const sentParts = computed(() => result.value?.request_sent?.input?.[1]?.content
           {{ result.latency_ms }} ms</template>)
         </p>
         <p v-if="result.error" class="bad" data-testid="img-error">{{ result.error }}</p>
-        <p class="hint" data-testid="img-compare">
-          For comparison (not sent to the model): Python calculated SMA crossover
-          <strong>{{ result.python_crossover ?? 'unknown' }}</strong> at this candle.
+        <p class="hint" data-testid="img-context">
+          Capture time <span data-testid="img-capture-time">{{ utc(result.capture_time) }}</span> ·
+          <strong data-testid="img-stale" :class="result.stale ? 'warn' : ''">{{ result.stale ? 'stale' : 'not stale' }}</strong>
+          · position <strong data-testid="img-position" :class="result.position?.state === 'unknown' ? 'warn' : ''">
+            {{ positionText }}</strong>
+          (sent to the model, except the share count)
         </p>
-        <p class="no-trade" data-testid="img-no-trade">No trade placed. This stance is not eligible for execution.</p>
+        <p class="hint" data-testid="img-compare">
+          Python applied the same rule to the last two completed candles (not sent):
+          <strong data-testid="img-python-signal">{{ result.python_signal ?? 'unknown' }}</strong> ·
+          <strong data-testid="img-signal-check" :class="result.signal_match ? 'ok' : 'bad'">{{ matchText }}</strong>.
+          SMA crossover at this candle: {{ result.python_crossover ?? 'unknown' }}.
+        </p>
+        <p class="no-trade" data-testid="img-no-trade">No trade placed. This answer is not eligible for execution.</p>
         <details>
           <summary>What the model was sent</summary>
           <p class="hint" data-testid="img-sent-parts">Message parts: {{ sentParts.join(' + ') }}</p>
           <p class="hint">“{{ sentText }}” + the PNG above.</p>
           <p class="hint">Instructions: {{ instructions }}</p>
+          <template v-if="question">
+            <p class="hint" data-testid="img-question">Question <strong>{{ question.name }}</strong>:
+              {{ question.instructions }}</p>
+            <ul class="hint">
+              <li v-for="c in question.choices" :key="c.value"><strong>{{ c.value }}</strong>: {{ c.description }}</li>
+            </ul>
+          </template>
         </details>
       </div>
     </div>
@@ -284,6 +352,14 @@ const sentParts = computed(() => result.value?.request_sent?.input?.[1]?.content
 .capture { margin: 0; }
 .capture img { max-width: 100%; border: 1px solid #e3e6e8; border-radius: 8px; display: block; }
 .stance-line { margin: 0 0 0.3rem; font-size: 0.9rem; }
+.chosen-prob { font-size: 1.3rem; font-weight: 600; }
+.probs { margin: 0.2rem 0 0.6rem; }
+.prob-row { display: grid; grid-template-columns: 3.2rem minmax(0, 1fr) 3rem; gap: 0.5rem; align-items: center;
+  font-size: 0.8rem; margin: 0.15rem 0; }
+.prob-name.chosen { font-weight: 700; }
+.prob-bar { height: 0.55rem; background: #eef0f2; border-radius: 4px; overflow: hidden; }
+.prob-bar span { display: block; height: 100%; background: #8a95a1; }
+.prob-value { text-align: right; font-variant-numeric: tabular-nums; }
 .stance { display: inline-block; margin-left: 0.4rem; font-size: 1.6rem; text-transform: uppercase; letter-spacing: 0.03em; }
 .no-trade { font-size: 0.82rem; padding: 0.4rem 0.6rem; background: #fff8e6; border: 1px solid #f3dca4; border-radius: 8px; }
 .notice { padding: 0.6rem 0.8rem; margin: 0.5rem 0; border-radius: 10px; }
@@ -292,4 +368,5 @@ const sentParts = computed(() => result.value?.request_sent?.input?.[1]?.content
 .bad { color: #c62828; }
 .muted { color: #6b7280; }
 .warn { color: #b26b00; }
+.info { color: #2962ff; }
 </style>

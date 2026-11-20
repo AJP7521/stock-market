@@ -1017,3 +1017,251 @@ No new dependencies.
 
 Not checked: a live `long` or `short` answer (only `wait` was observed live; `long` and `short` were covered by the
 test double); the panel in replay mode against Claude.
+
+## Prompt 16A · `chart_signal` question with capture time and staleness (2026-11-17)
+
+The student's `chart_signal` question replaces `stance` word for word. The request now carries a context line
+(capture time = backend clock when the image arrives, interval, stale / not stale; stale = the cutoff candle
+completed more than one interval before the capture time) before the image. Python applies the same rule to the
+snapshot's last two completed candles (`python_signal`, never sent) and the panel shows match / CONFLICT. New
+`image_decisions` columns `capture_ms`, `stale`, `python_signal` (added with `ALTER TABLE` if missing; older rows keep
+`question` = `stance`). Test-double default `chart_signal=long`. No new dependencies.
+
+### Mocked checks (provider test double, **test data**)
+| Check | Command / action | Expected | Observed |
+|---|---|---|---|
+| Image-decision unit tests | `python3 -m unittest backend.tests.test_image_decisions -v` (test clock fixed) | 9 OK | **9 OK**: question sent equals the given JSON; parts `input_text, input_text, input_image`; context text exact; no symbol, cutoff time, open/close, crossover or cash in the request; TESTOC candles: cutoffs 15:01 long, 15:03 short, 15:02 wait (up then down), 15:04 wait (flat), 15:00 wait (one candle); stale boundary: exactly one interval after completion = not stale, 1 ms later = stale and Python expects wait |
+| All unit tests | `python3 -m unittest discover -s backend/tests -t .` | all OK | **127 tests, OK** |
+| Build | `cd frontend && npm run build` | no errors | built |
+| SmokeTest | `python3 -m backend.smoke` (test clock 15:05:20 in 2b, then released) | PASS | **PASS 67/67** (`smoke-20261117-141416`): 2b answer `wait`, question `chart_signal`, context "Capture time: 2026-11-09T15:05:20.000Z (UTC) … not stale", screen shows capture time, "not stale", Python `wait` · `match` (TESTSMA candles open = close); timeout still shown with no new marker; orders/fills/decisions unchanged |
+
+### Live checks (Claude, **live Yahoo data**, kept separate from the mocked checks)
+| Check | Action | Observed |
+|---|---|---|
+| Fresh chart | AAPL 1m, cutoff 2026-11-17 19:13 UTC, **Send chart image** | Image decision #2: `decided`, answer **wait**, `claude-opus-5-5`, live, 2648 ms; capture 19:14:53.472 UTC, **not stale**; Python `wait` → **match**; parts `input_text + input_text + input_image`; question `chart_signal` on screen with its three choices |
+| Stale chart | same, cutoff 19:07 UTC | Image decision #3: `decided`, answer **wait**, 1689 ms; capture 19:15:15.623 UTC, **stale**; Python `wait` → **match** |
+| SQLite matches the screen | `SELECT … FROM image_decisions WHERE id >= 2` | `2|…19:13:00Z|claude-opus-5-5|live|decided|wait|0|wait|…|2648|chart_signal` and `3|…19:07:00Z|…|decided|wait|1|wait|…|1689|chart_signal` |
+| No trade | `paper_orders` / `paper_fills` | 3 / 0, unchanged |
+| Browser console | errors only | only `Failed to fetch` / `ERR_CONNECTION_REFUSED` from panel polling while the backend was stopped for the SmokeTest; none from the new requests |
+
+Not checked: a live `long` or `short` answer (the live fresh chart's last two candles were not both up or both down;
+long and short were covered with TESTOC candles and the test double); intervals other than 1m live (the question
+says "one-minute candles"; for 5m and above the context names the interval, and Python applies the same
+two-candle rule).
+
+## Prompt 16B · Unreachable backend: no uncaught errors, slower retries, automatic recovery (2026-11-17)
+
+Frontend only: new `frontend/src/backend.js` (`backendFetch`, `createPoller`), used by `PaperPanel.vue`,
+`AutomationPanel.vue`, `IndicatorPanel.vue` and `App.vue`; `VoicePanel.vue` catches its first load. No backend,
+database or dependency change.
+
+| Check | Command / action | Expected | Observed |
+|---|---|---|---|
+| Proxy reply with only the backend stopped | `curl -i http://127.0.0.1:5173/api/paper/account` | an error status | **502 Bad Gateway**, `text/plain` (so 502/503/504 are treated as "unreachable", besides network failures) |
+| Before the fix | built-in browser, AAPL, backend stopped | — | `Uncaught (in promise) TypeError: Failed to fetch` from PaperPanel `refresh` (1 s), AutomationPanel `refresh`/`tick` (2 s), App `fetchSma`/`fetchIndicators`; after a reload also `SyntaxError … Unexpected end of JSON input` from IndicatorPanel `loadTypes` with a Vue "Unhandled error during execution of mounted hook" warning |
+| Build | `cd frontend && npm run build` | no errors | built |
+| Backend stopped, page reloaded, 30 s | console after a marker line | no uncaught errors | **none**; about 25 `Failed to load resource … 502` lines in 30 s, spacing out (2 s → 4 s → … 30 s), and one `WebSocket connection … failed` (browser-level, written by the browser itself). Screen: header "Backend unreachable: retrying…", candles "Could not load candles: backend unreachable (HTTP 502 from the dev proxy)", Paper and Indicators panels show their notices |
+| Backend started again | wait ≤ 35 s | page recovers by itself | header `ok`, WebSocket `open`, candles reloaded, notices gone, indicator types loaded (2), paper cash $1,000.00; **no console messages** after the backend came back |
+| SmokeTest | `python3 -m backend.smoke` | PASS | **PASS 67/67** (`smoke-20261117-142407`); 0 "uncaught" lines in its `browser-console.log` |
+
+Not checked: the Voice panel's decision list does not reload by itself after the backend returns (its **Refresh**
+button does); the time to recover is up to the current pause (at most 30 s).
+
+## Prompt 16C · `chart_signal` choices compare the two closing prices (2026-11-17)
+
+The student's new choices replace the 16A choices word for word (name and instructions unchanged): long if the newer
+completed candle closes above the preceding close, short if below, wait if equal (or insufficient, unclear, stale).
+`python_signal` now applies that rule; opens no longer count. Rows stored under 16A keep the value calculated then.
+No database, API or dependency change.
+
+### Mocked checks (provider test double, **test data**)
+| Check | Command / action | Expected | Observed |
+|---|---|---|---|
+| Tests after changing only the rule | `python3 -m unittest backend.tests.test_image_decisions` | the two tests written for the old rule fail | **2 failures**, as expected: TESTSMA 15:04 now `long` (was `wait`); TESTOC 15:02 now `short` (was `wait`) |
+| Image-decision unit tests (updated) | same | 9 OK | **9 OK**: TESTOC closes 11, 12, 11, 10, 10, 12, 13 → cutoffs 15:01 long, 15:02 short, 15:03 short, 15:04 wait (equal closes), 15:06 long (a red candle, open 14 close 13, still closes above 12), 15:00 wait (one candle); request carries the new choice texts exactly |
+| All unit tests | `python3 -m unittest discover -s backend/tests -t .` | all OK | **127 tests, OK** |
+| Build | `cd frontend && npm run build` | no errors | built |
+| SmokeTest | `python3 -m backend.smoke` | PASS | **PASS 67/67** (`smoke-20261117-142734`): 2b answer `long`, Python `long` · `match` (TESTSMA closes 13 then 19), marker `[(15:04, long)]` |
+
+### Live check (Claude, **live Yahoo data**)
+| Check | Action | Observed |
+|---|---|---|
+| Fresh chart | AAPL 1m, cutoff 2026-11-17 19:27 UTC, **Send chart image** | Image decision #4 (snapshot 12): `decided`, answer **long**, `claude-opus-5-5`, live, 2142 ms; capture 19:28:13.590 UTC, not stale; Python `long` → **match** |
+| The two closes (snapshot, not sent) | `decision_snapshots` row 12 | 19:26 close 350.67, 19:27 close 350.71 → newer above older: long |
+| SQLite | `SELECT … FROM image_decisions WHERE id = 4` | `4|12|2026-11-17T19:27:00Z|claude-opus-5-5|live|decided|long|0|long|2142|The more recent of the two completed candles closes above the preceding candle's close.` |
+| No trade | `paper_orders` / `paper_fills` | 3 / 0, unchanged |
+
+Not checked live: a `short` answer, an equal-close `wait`, and a case where the two rules disagree (both 19:26 and
+19:27 were also green candles, so the 16A rule would have said long too); those are covered by the unit tests.
+
+## Prompt 16D · Probabilities in the decision label (2026-11-17)
+
+The Claude Messages API returns no measured probabilities; with the student's choice ("Ask Claude to estimate"), the
+image-only request asks Claude for its own estimate per choice (`chart_signal_probabilities` in the structured
+output, enabled by `estimate_probabilities` in the request; the analyst/reviewer requests are unchanged and the OpenAI
+path drops the flag). Replies are converted to the excerpt's shape `answers[].probabilities = [{value, probability}]`,
+checked (one per choice, 0–1, sum 1 ± 0.02) and stored (`probabilities_json`, `probabilities_check`). Label: answer +
+estimate when valid (`short 55%`), in the panel and on the chart marker; source shown as model-estimated / test
+double (fixed). No new dependencies.
+
+### Mocked checks (provider test double, **test data**)
+| Check | Command / action | Expected | Observed |
+|---|---|---|---|
+| Existing tests after the request change | `python3 -m unittest backend.tests.test_image_decisions` | only the schema test fails | **1 failure** as expected: the Claude schema now has `chart_signal_probabilities` |
+| Image-decision unit tests (updated) | same | 13 OK | **13 OK**: schema `{chart_signal enum, chart_signal_probabilities {long, short, wait: number}}`, both required; a Claude reply `{"chart_signal":"wait","chart_signal_probabilities":{…}}` becomes the excerpt shape in choice order; analyst requests ask for `action` only; checks: valid, sum 1.01 valid, missing, invalid for sum 1.40 / out of range / missing value / duplicate / string / object; label `wait 85%` when valid, `wait` when the sum is 1.40, `long` when missing, none on timeout |
+| All unit tests | `python3 -m unittest discover -s backend/tests -t .` | all OK | **131 tests, OK** |
+| Build | `cd frontend && npm run build` | no errors | built |
+| SmokeTest | `python3 -m backend.smoke` | PASS | **PASS 70/70** (`smoke-20261117-143412`): label `long 80%`, bars long 80% / short 5% / wait 15%, source `test double (fixed)`, check `valid`; SQLite probabilities in the excerpt shape; marker label `long 80%` |
+
+### Live check (Claude, **live Yahoo data**)
+| Check | Action | Observed |
+|---|---|---|
+| Chart-only decision | AAPL 1m, cutoff 2026-11-17 19:33 UTC, **Send chart image** | Image decision #5 (snapshot 13): `decided`, label **short 55%**, bars long 20% / short 55% / wait 25%, source **model-estimated**, check **valid**; `claude-opus-5-5`, live, 3685 ms; not stale; Python `short` → **match** |
+| Claude's raw reply | `response_json.raw_response.content` | `{"chart_signal":"short","chart_signal_probabilities":{"long":0.2,"short":0.55,"wait":0.25}}` |
+| The two closes (not sent) | snapshot 13 | 19:32 close 350.33, 19:33 close 350.305 → newer below older: short |
+| SQLite | `SELECT … FROM image_decisions WHERE id = 5` | `5|13|…19:33:00Z|claude-opus-5-5|live|decided|short|short|[{"value": "long", "probability": 0.2}, {"value": "short", "probability": 0.55}, {"value": "wait", "probability": 0.25}]|valid|3685` |
+| Chart marker | zoomed screenshot | "Claude: short 55%" at 19:33; it overlaps the neighbouring "Cross down" marker text (both above the bars). Earlier markers show no percentage (decided before 16D) |
+| No trade | `paper_orders` / `paper_fills` | 3 / 0, unchanged |
+
+Not checked: a live reply with invalid estimates (covered by unit tests); whether Claude's estimates are calibrated —
+they are the model's own numbers, not measured probabilities.
+
+## Prompt 16E · Position-aware `chart_signal`: long, short, hold, exit, wait (2026-11-17)
+
+The student approved the agent's recommended question "as written" (five values; WAIT first for insufficient,
+unclear or stale evidence and missing/unknown position) and chose the main paper account as the position source.
+Position context (application-defined): 0 shares → explicitly empty; > 0 → open, long; missing account → unknown;
+sent as "position exists" and "direction" only. Python applies the same rule. Answers, labels, probability bars
+(matched by value, shown in choice order) and chart markers (one style per value) handle all five values.
+`image_decisions`: `position_state`, `position_direction`, `position_shares`; the `stance` CHECK constraint is widened
+by a one-time table rebuild. No new dependencies.
+
+### Mocked checks (provider test double, **test data**)
+| Check | Command / action | Expected | Observed |
+|---|---|---|---|
+| Tests after the question change | `python3 -m unittest backend.tests.test_image_decisions` | tests written for three values fail | **5 failures**, as expected (three-value schema, choice list, probabilities and context text) |
+| Image-decision unit tests (updated) | same | 16 OK | **16 OK** (one test-side slicing mistake fixed first). Rule table: empty 10→11 long, 11→10 short, equal wait; long 10→11 hold, 11→10 exit; short 11→10 hold, 10→11 exit; unknown → wait; stale → wait; one candle → wait. Context: open long "position exists = yes; direction = long." → hold; unknown "position state is unknown (missing)." → wait; stored position columns. Probabilities: five values valid in any order; the old three values, a duplicate, an unknown value → invalid; label by value. Rebuild: an old-style table rejects "hold", after `ensure_schema` the row is kept, "hold" accepted, "buy" rejected, index present, temporary table gone, second run no-op |
+| All unit tests | `python3 -m unittest discover -s backend/tests -t .` | all OK | **134 tests, OK** |
+| Build | `cd frontend && npm run build` | no errors | built |
+| SmokeTest | `python3 -m backend.smoke` | PASS | **PASS 74/74** (`smoke-20261117-144158`): five choices asked; position context sent and shown "explicitly empty (0 shares)"; SQLite `empty, NULL, 0`; bars in choice order although the estimates arrived wait-first: long 80%, short 5%, hold 3%, exit 2%, wait 10% |
+
+### Real database rebuild
+| Check | Action | Observed |
+|---|---|---|
+| Backup first | `sqlite3 backend/data/market.sqlite ".backup …/scratchpad/market-before-16e.sqlite"` | 5 `image_decisions` rows, integrity ok |
+| Rebuild on first use | backend restarted, `GET /api/image-decisions?symbol=AAPL&timeframe=1m` | 5 rows, labels unchanged (`short 55%`, `long`, `wait` ×3); CHECK now `('long', 'short', 'hold', 'exit', 'wait')`; index present; integrity ok |
+
+### Live check (Claude, **live Yahoo data**)
+| Check | Action | Observed |
+|---|---|---|
+| Chart-only decision, empty position | AAPL 1m, cutoff 2026-11-17 19:41 UTC | Image decision #6 (snapshot 14): `decided`, label **short 45%**, bars long 20% / short 45% / hold 0% / exit 0% / wait 35%, check valid; `claude-opus-5-5`, live, 4870 ms; not stale; position "explicitly empty (0 shares)"; Python `short` → **match** |
+| Context sent | `request_json` | "…Context: not stale. … Position context (application-defined): position exists = no; the position is explicitly empty." |
+| Claude's raw reply | `response_json` text block | `{"chart_signal":"short","chart_signal_probabilities":{"long":0.2,"short":0.45,"hold":0.0,"exit":0.0,"wait":0.35}}` |
+| The two closes (not sent) | snapshot 14 | 19:40 350.6477, 19:41 350.575 → lower: short |
+| No trade | `paper_orders` / `paper_fills` | 3 / 0, unchanged |
+| Browser console | uncaught errors | only entries from before Prompt 16B (old line numbers, e.g. `IndicatorPanel.vue:83`); none from this session |
+
+Not checked live: an open position (hold / exit) or an unknown position with Claude. The main paper account holds 0
+shares, and opening a position would change the student's paper account; both cases are covered by unit tests with
+the test double. A short position cannot occur in the long-only simulator.
+
+## Prompt 16F · chart_signal scenario comparison: outgoing definitions and displayed answers (2026-11-17)
+
+New: `backend/compare_chart_signal.py` (one command, 16 scenarios through the real panel on a temporary database);
+labelled fixture TESTSIG (`backend/fixtures.py`, `signal`); test-only `POST /api/test/position` (`TEST_FEED=on`) with
+`image_decisions.position_source`; the panel labels "TEST override"; `Smoke.backend_env()` (refactor, SmokeTest
+unchanged). The real paper account is never used. Outgoing questions are compared with the approved JSON parsed from
+`prompts/16e-position-aware-chart-signal.md`; expected answers come from a hand-written table.
+
+### Mocked checks (provider test double, **test data**)
+| Check | Command | Expected | Observed |
+|---|---|---|---|
+| Unit tests | `python3 -m unittest discover -s backend/tests -t .` | all OK | **135 tests, OK** (2 position tests updated for the new `source` field; 1 override test added) |
+| Comparison, test double | `python3 -m backend.compare_chart_signal` | 224 checks pass | **PASS 224/224** (`compare-20261117-144746`, again `compare-20261117-152451`): every request carried the approved question and the right position sentence, not stale, no symbol or prices; answer, label (`<expected> 80%`), position, Python's answer and match/CONFLICT on screen equal SQLite; Python equals the hand table in all 16 |
+| SmokeTest after the `backend_env()` refactor | `python3 -m backend.smoke` | PASS | **PASS 74/74** (`smoke-20261117-152427`) |
+
+### Live runs (Claude, **test data**, kept separate from the mocked checks)
+| Run | Command | Observed |
+|---|---|---|
+| 1 | `python3 -m backend.compare_chart_signal --live` | scenarios 1–12 done, 144/144 checks passed, then **the headless browser closed** (`compare-20261117-144758-live`) |
+| AutoLoop cycle 1 | the comparison logged nothing about the browser; added console, page-error, crash and disconnect logging | — |
+| 2 | same | scenarios 1–9, then `net::ERR_NETWORK_IO_SUSPENDED` and **DISCONNECTED** (`compare-20261117-144859-live`): macOS was going to sleep |
+| AutoLoop cycle 2 | run under `caffeinate -dimsu` (keeps the Mac awake for that command only; no setting changed) | — |
+| 3 | `caffeinate -dimsu python3 -m backend.compare_chart_signal --live` | scenarios 1–11, then DISCONNECTED again, about 32 s after launch, no crash or suspend message (`compare-20261117-144940-live`). Cause not found: no system log entry, no Playwright Chromium installed to compare with. Also seen at start-up: two HTTP 500s "duplicate column name: decision_id" (the known first-connection race on a new database; it did not stop the run) |
+| AutoLoop cycle 3 | added `--evidence` to run a subset | — |
+| 4 | `caffeinate -dimsu python3 -m backend.compare_chart_signal --live --evidence mixed-equal` | **PASS 48/48**, 4/4 agree (`compare-20261117-152350-live`) |
+
+Live answers for all 16 scenarios (runs 1 and 4; every outgoing-definition and display check passed in every
+scenario that ran):
+
+| # | Evidence (newer close vs preceding) | Position | Expected | Python | Claude (label shown) | Agree | Estimates shown |
+|---|---|---|---|---|---|---|---|
+| 1 | clear up: green candle, close 11 -> 12 | empty | long | long | long 90% | agree | long 90%, short 1%, hold 1%, exit 1%, wait 7% |
+| 2 | clear up: green candle, close 11 -> 12 | long | hold | hold | hold 90% | agree | long 1%, short 1%, hold 90%, exit 2%, wait 6% |
+| 3 | clear up: green candle, close 11 -> 12 | short | exit | exit | exit 87% | agree | long 0%, short 0%, hold 3%, exit 87%, wait 10% |
+| 4 | clear up: green candle, close 11 -> 12 | unknown | wait | wait | wait 93% | agree | long 3%, short 1%, hold 2%, exit 1%, wait 93% |
+| 5 | clear down: red candle, close 12 -> 11 | empty | short | short | short 85% | agree | long 3%, short 85%, hold 1%, exit 1%, wait 10% |
+| 6 | clear down: red candle, close 12 -> 11 | long | exit | exit | exit 90% | agree | long 0%, short 0%, hold 3%, exit 90%, wait 7% |
+| 7 | clear down: red candle, close 12 -> 11 | short | hold | hold | hold 88% | agree | long 1%, short 1%, hold 88%, exit 4%, wait 6% |
+| 8 | clear down: red candle, close 12 -> 11 | unknown | wait | wait | wait 95% | agree | long 1%, short 2%, hold 1%, exit 1%, wait 95% |
+| 9 | mixed: RED candle but close higher, 11 -> 11.4 | empty | long | long | short 85% | **DISAGREE** | long 3%, short 85%, hold 1%, exit 1%, wait 10% |
+| 10 | mixed: RED candle but close higher, 11 -> 11.4 | long | hold | hold | exit 90% | **DISAGREE** | long 0%, short 0%, hold 3%, exit 90%, wait 7% |
+| 11 | mixed: RED candle but close higher, 11 -> 11.4 | short | exit | exit | exit 85% | agree | long 0%, short 0%, hold 5%, exit 85%, wait 10% |
+| 12 | mixed: RED candle but close higher, 11 -> 11.4 | unknown | wait | wait | wait 90% | agree | long 2%, short 3%, hold 2%, exit 3%, wait 90% |
+| 13 | mixed: GREEN candle but close equal, 11.4 -> 11.4 | empty | wait | wait | wait 65% | agree | long 20%, short 15%, hold 0%, exit 0%, wait 65% |
+| 14 | mixed: GREEN candle but close equal, 11.4 -> 11.4 | long | wait | wait | wait 60% | agree | long 1%, short 1%, hold 20%, exit 18%, wait 60% |
+| 15 | mixed: GREEN candle but close equal, 11.4 -> 11.4 | short | wait | wait | wait 70% | agree | long 0%, short 0%, hold 15%, exit 15%, wait 70% |
+| 16 | mixed: GREEN candle but close equal, 11.4 -> 11.4 | unknown | wait | wait | wait 92% | agree | long 2%, short 2%, hold 2%, exit 2%, wait 92% |
+
+Findings:
+- Claude agreed with the rule in **14/16** scenarios. Clear up, clear down and unknown positions: 12/12. Equal
+  closes: 4/4 wait, with lower confidence (60–70%) when a position was known.
+- **Red candle that closes higher (9, 10): Claude answered as if the close were lower** (short; exit for a long
+  position), in both live runs that reached them (run 3: short 85%, exit 88%). With a short position (11) it answered
+  exit, which needs the opposite reading. So its reading of the same chart changed with the position, and the
+  "agree" in scenario 11 may not mean it applied the rule. The panel showed **CONFLICT** in 9 and 10, as intended.
+- The outgoing definitions and the display were correct in every scenario. The disagreements come from how the model
+  reads the image, not from what was sent or shown.
+
+Not checked: why the headless browser closes about 32 s into a live run; a full 16-scenario live run in one go;
+the real paper account with an open position (by design, the override is used instead).
+
+## Prompt 17 · SMA crossover backtest: no look-ahead, simulated account, stored runs (2026-11-19)
+
+New: `backend/backtest.py` (rule-based SMA crossover, long only; decision at candle *i* sees only `candles[:i+1]`;
+fill at the next candle's open; whole shares, fully invested, zero fees; runs stored in `backtest_runs`,
+`backtest_fills`, `backtest_equity`); `POST/GET /api/backtests*`; `frontend/src/BacktestPanel.vue`;
+`pnl.apply_fill` (weighted average cost, now shared by `pnl.record_fill` and the backtest); labelled fixtures TESTBT
+and SYNTHBT (`backend/fixtures.py`, `backtest`, `synthetic`, `--keep`); SmokeTest check 4; launch configuration
+`backend-backtest-demo` (`MARKET_DB=backend/data/test-backtest.sqlite`, `LIVE_FEED=off`). No dependency changes.
+
+Hand calculation (TESTBT, SMA 2/4, $1,000; also in `backend/fixtures.py` and `backend/tests/test_backtest.py`):
+buy 48 @ 20.5 → sell 48 @ 21 (+$24) → buy 47 @ 21.5 → sell 47 @ 18.5 (−$141) → buy 39 @ 22.5, open at the last
+close 24. Final equity $941.50 (−5.85%), realized −$117.00, unrealized +$58.50; buy and hold $1,200 (+20.00%);
+max drawdown $260.50 (23.26%, peak $1,120 → $859.50); 1 of 2 round trips won; holding at 6 of 18 closes.
+
+### Checks (all on **test data**; no live provider involved)
+| Check | Command | Expected | Observed |
+|---|---|---|---|
+| Existing P&L, paper and automation tests after extracting `apply_fill` | `python3 -m unittest backend.tests.test_pnl backend.tests.test_paper backend.tests.test_automation` | OK | **27 tests, OK** |
+| New backtest tests (hand calculation, storage, forming candle excluded, bad input, signals equal the chart's crossovers, changing or removing future candles leaves earlier decisions and equity unchanged, next-open fill, unfilled last signal, rejected buy, `apply_fill` = Prompt 9D example) | `python3 -m unittest backend.tests.test_backtest -v` | OK | **10 tests, OK** |
+| Full unit suite | `python3 -m unittest discover -s backend/tests -t .` | OK | **145 tests, OK** |
+| Engine on TESTBT | `run_backtest(conn, "TESTBT", "1m", 2, 4, 1000)` on `backend/data/test-backtest.sqlite` | hand table | **matches** (all five orders and every summary figure) |
+| Engine speed on SYNTHBT (780 one-minute candles, SMA 10/30) | same, `SYNTHBT` | finishes quickly | **0.03 s**; 13 round trips, 6 won, −0.92% vs buy and hold −1.15% |
+| API | `POST /api/backtests` TESTBT 1m 2/4 $1,000 (backend `backend-backtest-demo`) | 201, hand table, data labelled TEST | **201**, summary equal to the hand table, `data_source` "TEST data (labelled fixture, SQLite)" |
+| Browser (Claude's browser pane, Vite + FastAPI) | `?symbol=TESTBT&interval=1m`, Short 2, Long 4, **Run backtest** | tiles $941.50, −5.85%, +20.00%, −23.26%, 1 / 2 won, −$117.00, $58.50; five orders; equity chart with markers | **all as expected** (screenshot taken in the session) |
+| Browser, longer data | `?symbol=SYNTHBT&interval=5m`, SMA 5/20 | run shown, TEST label, interpretation lists | 156 candles, −2.44% vs buy and hold −1.15%, 4 round trips, both lists shown. Found and fixed: a negative amount printed as `$-1.17`; now `-$1.17` |
+| Frontend build | `npm --prefix frontend run build` | builds | **built** |
+
+Observed in passing (existing, not changed here): on a brand-new database the first page load can log two HTTP 500s
+"duplicate column name: decision_id" (`paper.ensure_schema` run by two requests at once), as recorded for Prompt 16F.
+
+### SmokeTest (`python3 -m backend.smoke`)
+| Run | Observed |
+|---|---|
+| 1 | **FAIL** (`smoke-20261119-214147`): check 1 timed out waiting for the replay symbol TESTSMA, 0 checks recorded. TESTBT had been seeded at start-up and (same date) became the default replay session. |
+| AutoLoop cycle 1 | seed TESTBT at the start of check 4 instead of at start-up (`backend/smoke.py`) |
+| 2 | **PASS 82/82** (`smoke-20261119-214245`): checks 1–3 unchanged (74), check 4 all 8 pass: tiles, five orders and fills on screen, TEST label, uncertainty list, stored `backtest_runs` and `backtest_fills` equal to the hand table, no paper fill for TESTBT |
+
+Not checked: a backtest on live-recorded Yahoo data (none recorded in this session's databases); replay mode with the
+backtest panel (it uses the replay symbol but always backtests all stored candles, not the replay position).

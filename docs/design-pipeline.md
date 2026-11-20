@@ -101,11 +101,17 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | Orders and fills linked to a decision (`decision_id`, one order per decision), FILL_CHECKS / ORDER_DECIDED hooks inside the fill transaction | `backend/paper.py` | exists |
 | Automation panel: Start/Stop, polling for completed candles, off-screen render + capture, runs table, decision trace | `frontend/src/AutomationPanel.vue`, `App.vue` | exists |
 | Voice about one decision: read-only record from SQLite, Claude replies with session history, sessions/turns stored; `GET /api/decisions`, `/api/voice/sessions*` | `backend/voice.py`, `backend/app.py` | exists |
-| SmokeTest: one command, temporary DB, FastAPI + Vite + headless Chrome (Playwright), three checks, report, cleanup; GitHub Actions on push | `backend/smoke.py`, `.github/workflows/smoke.yml`, `backend/requirements-dev.txt` | exists |
+| SmokeTest: one command, temporary DB, FastAPI + Vite + headless Chrome (Playwright), four checks (4: backtest, Prompt 17), report, cleanup; GitHub Actions on push | `backend/smoke.py`, `.github/workflows/smoke.yml`, `backend/requirements-dev.txt` | exists |
 | Test controls (TEST_FEED=on only): fixed server clock, runtime test-double answers / failures; automation order size per Start | `backend/recorder.py` (`TEST_NOW_MS`), `backend/decisions.py` (`TEST_ANSWERS`), `backend/app.py` (`/api/test/clock`, `/api/test/provider`), `backend/automation.py` | exists |
 | Voice panel: decision picker, microphone (getUserMedia) indicator, Web Speech recognition + synthesis, End releases the microphone | `frontend/src/VoicePanel.vue` | exists |
-| Image-only chart decision (Prompt 16): only the PNG + fixed instructions go to the model, one question `stance` (long / short / wait), stored in `image_decisions`; never a trade | `backend/image_decisions.py`, `/api/image-decisions*` | exists |
+| Image-only chart decision (Prompts 16, 16A): only the PNG, fixed instructions and a context line (capture time, interval, stale flag) go to the model; a position-context line from the snapshot's paper account (Prompt 16E: empty / open + direction / unknown); one question `chart_signal` with five values (empty: long / short; open: hold / exit; equal closes wait; stale, unclear or unknown position wait first); Python applies the same rule for comparison; stored in `image_decisions`; never a trade | `backend/image_decisions.py`, `/api/image-decisions*` | exists |
+| Unreachable backend (Prompt 16B): `backendFetch` (network failure or proxy 502/503/504 → `BackendUnreachable`), `createPoller` (catches failures, pause doubles to 30 s, normal interval after a success); header health retry reloads the live chart and WebSocket when the backend returns | `frontend/src/backend.js`, used by `App.vue`, `PaperPanel.vue`, `AutomationPanel.vue`, `IndicatorPanel.vue` | exists |
+| chart_signal scenario comparison (Prompt 16F): 16 scenarios on the TESTSIG fixture through the real panel; outgoing question vs the approved JSON in `prompts/16e…`, context, display vs SQLite vs a hand-written table; test double or `--live` | `backend/compare_chart_signal.py` (reuses `Smoke` services via `backend_env()`), `backend/fixtures.py` (`signal`) | exists |
+| Test-only position override for image-only decisions (`TEST_FEED=on`): empty / open long / open short / unknown, stored as `position_source = TEST override` | `POST /api/test/position`, `backend/image_decisions.py` (`TEST_POSITION`) | exists |
 | Chart-only decision panel with a step-by-step flowchart (Browser / Backend / Model lanes), and stance markers on the main chart | `frontend/src/ImageDecisionPanel.vue`, `CandleChart.vue` (`stances` prop), `chartAdapter.js` (`toStanceMarkers`), `App.vue` | exists |
+| SMA crossover backtest (Prompt 17): rule-based, long only; decision at candle *i* sees only completed candles up to *i*; fill at the next candle's open; whole shares, fully invested, zero fees; equity at every close; buy-and-hold comparison; drawdown; round trips; interpretation (establishes / uncertain); runs stored | `backend/backtest.py`, `POST/GET /api/backtests*`, `backend/pnl.py` (`apply_fill`, shared with the paper account) | exists |
+| Backtest panel: settings, summary tiles, equity curve with fill markers, orders and fills, round trips, interpretation, earlier runs | `frontend/src/BacktestPanel.vue`, `App.vue` | exists |
+| Backtest fixtures: TESTBT (18 hand-calculated candles) and SYNTHBT (two synthetic sessions, seeded random walk), both `source='test'` | `backend/fixtures.py` (`backtest`, `synthetic`) | exists |
 | Voice | – | planned (Prompt 13) |
 
 ## File responsibilities
@@ -325,7 +331,7 @@ VoicePanel: choose decision -> Start voice
 Deviation from the prompt: no WebRTC audio stream to a model (the Claude API has no audio).
 ```
 
-## Chart-only decision path (Prompt 16)
+## Chart-only decision path (Prompts 16, 16A, 16C, 16D, 16E)
 
 The same flowchart is drawn in the panel, and each step lights up while a request runs.
 
@@ -339,15 +345,15 @@ flowchart TD
   subgraph Backend["Backend (FastAPI + SQLite)"]
     B["2 Freeze the snapshot<br/>decision_snapshots"]
     D["4 Check the PNG and the capture<br/>store captures/snapshot-id-sha.png"]
-    F["6 Validate 'stance' by name<br/>image_decisions"]
+    F["6 Validate 'chart_signal' by name<br/>Python applies the same rule<br/>image_decisions"]
   end
   subgraph Model["Model (Claude)"]
-    E["5 Look at the image only<br/>answer: long / short / wait"]
+    E["5 Read the last two completed candles<br/>question chart_signal: long / short / wait"]
   end
   A -->|"POST /api/decisions/snapshots"| B
   B -->|"chart section"| C
   C -->|"POST /api/image-decisions<br/>PNG + snapshot ID"| D
-  D -->|"PNG + fixed text only"| E
+  D -->|"PNG + capture time, interval, stale flag"| E
   E -->|"stance"| F
   F -->|"record"| G
   G -.->|"GET /api/image-decisions (markers)"| F
@@ -359,10 +365,23 @@ flowchart TD
 POST /api/image-decisions {snapshot_id, image_png, capture {snapshot_id, symbol, interval, cutoff}}
   load_snapshot (missing, or no cutoff candle -> 422) ; read_png (unreadable -> 422) ; check_capture (mismatch -> 422)
   store_png -> <db folder>/captures/snapshot-<id>-<sha16>.png
-  build_request: developer instructions + ONE user message [input_text (fixed), input_image (data URL)]
-                 question "stance": long | short | wait            (no input_json: no symbol, prices, SMAs, account)
+  capture_ms = now_ms() ; stale = capture_ms - decision_ms (cutoff candle completion) > one interval
+  build_request: developer instructions + ONE user message
+                 [input_text (context: capture time, interval, stale / not stale), input_text (fixed), input_image]
+                 position_of(snapshot.account): 0 shares -> empty; > 0 -> open long; < 0 -> open short; missing ->
+                 unknown; sent in the context line as "position exists" + "direction" (no shares, no cash)
+                 question "chart_signal" (16E, verbatim): long | short | hold | exit | wait
+                 (no input_json: no symbol, prices, opens/closes, SMAs, account)
+                 "estimate_probabilities": true -> Claude schema adds chart_signal_probabilities {long, short, wait}
+                 (the model's own estimate; OpenAI drops the flag); reply -> probabilities [{value, probability}]
+  check_probabilities: one per choice, each 0..1, sum 1 +/- 0.02 -> valid | missing | invalid: <reason>
+  label = "<answer> <estimate %>" when valid, else "<answer>" (panel label, probability bars, chart marker text)
+  python_signal: stale, fewer than two candles or unknown position -> wait; equal closes -> wait;
+                 empty: higher long, lower short; open: in the position's direction hold, against it exit
+                 (comparison only, never sent)
   provider = make_provider()  (Claude: image block + structured output {"stance": enum}; test double; OpenAI)
-  image_decisions row: status, stance, python_crossover (comparison only), image path + sha256,
+  image_decisions row: status, stance (= the chart_signal answer), capture_ms, stale, python_signal,
+                       python_crossover (comparison only), image path + sha256,
                        request (image as a file reference), response, latency
 GET /api/image-decisions?symbol&timeframe -> latest decided stance per candle -> CandleChart markers
   long: green arrow below the bar; short: red arrow above; wait: grey circle. Paper tables are never written.
@@ -380,8 +399,9 @@ python3 -m backend.smoke
     2 Live TESTSMA, SMA 2/3, cutoff 15:04 -> Ask about chart (POST /api/test/provider answers)
         screen answers / verdict / eligibility; SQLite response_json.received_images + received_snapshot
         (analyst and reviewer); stored PNG decoded in the browser; fills unchanged; then fail=provider_error
-    2b Chart-only decision (Prompt 16), cutoff 15:04, answers stance=short -> screen stance / MOCK / flowchart
-        step 7 done; SQLite request parts = [input_text, input_image], test double received no snapshot data,
+    2b Chart-only decision (Prompts 16, 16A), cutoff 15:04, test clock 15:05:20, answers chart_signal=wait ->
+        screen answer / MOCK / capture time / not stale / Python wait + match / flowchart step 7 done;
+        SQLite question chart_signal, request parts = [input_text x2, input_image], test double received no snapshot data,
         same PNG sha256; marker list; orders, fills, decisions unchanged; then fail=timeout (step 5 failed, no marker)
     3 TESTAUTO on the test clock (POST /api/test/clock + /api/test/observations), automation Start (size 4)
         m4 up: buy 4 -> fill 100; duplicate apply/claim; Stop, Start (size 1); m5 down: sell 1 -> fill 110;
@@ -430,9 +450,18 @@ observations".
 | `decision_snapshots` | frozen snapshot | `kind` (application/test), `symbol`, `interval`, `decision_ms`, `candle_ts`, `complete`, `snapshot_json` (candle, SMAs, crossover, account, chart section) | `id` | `decisions.create_snapshot` |
 | `decisions` | decision (analyst + reviewer) | `snapshot_id`, `provider`, `model`, `call_kind` (live/mock), `status`, `proposal`, `validation_*`, `eligible_for_order`, `explanation`, `request_json` / `response_json` (images as file references), `questions_json`, `answers_json`, `chart_checks_json`, `image_path` + `image_json` (sha256), `reviewer_status`, `verdict`, `reviewer_model`, `review_json`, `strategy_json`, `final_check_json` | `id` | `decisions.decide` |
 
-| `image_decisions` | image-only stance (Prompt 16) | `snapshot_id`, `symbol`, `interval`, `candle_ts` (marker position), `provider`, `model`, `call_kind` (live/mock), `status` (decided / malformed_answer / timeout / provider_error), `stance` (long / short / wait), `python_crossover` (comparison only, not sent), `image_path` + `image_json` (sha256), `request_json` (image as a file reference), `response_json`, `error`, `latency_ms` | `id`; index `(symbol, interval, candle_ts)` | `image_decisions.decide_image` |
+| `image_decisions` | image-only answer (Prompts 16–16E) | `snapshot_id`, `symbol`, `interval`, `candle_ts` (marker position), `provider`, `model`, `call_kind` (live/mock), `status` (decided / malformed_answer / timeout / provider_error), `stance` (the answer: long / short / hold / exit / wait, CHECK widened in 16E by a one-time rebuild that copies every row; question `stance` before 16A, `chart_signal` from 16A), `position_state` (empty / open / unknown, sent), `position_direction` (long / short, sent), `position_shares` (not sent), `position_source` (paper account / TEST override; Prompt 16F), `capture_ms` (capture time sent), `stale` (0/1, sent), `python_signal` (Python's answer to the same rule, not sent), `probabilities_json` ([{value, probability}]; Claude: model-estimated), `probabilities_check` (valid / missing / invalid: reason), `python_crossover` (comparison only, not sent), `image_path` + `image_json` (sha256), `request_json` (image as a file reference), `response_json`, `error`, `latency_ms` | `id`; index `(symbol, interval, candle_ts)` | `image_decisions.decide_image` |
 
 Chart captures are PNG files beside the database (`captures/snapshot-<id>-<sha>.png`, ignored by Git).
+
+### Backtests (Prompt 17)
+| Table | One row per | Key columns | Uniqueness | Written by |
+|---|---|---|---|---|
+| `backtest_runs` | backtest run | `symbol`, `timeframe`, `short`, `long`, `strategy`, `fill_rule`, `data_source`, `data_labels` (observation sources: test / yahoo / synthetic), `as_of_ms`, `first_candle`, `last_candle`, `candle_count`, `excluded_count` (forming), `starting_cash_micros`, `final_cash_micros`, `final_shares`, `final_equity_micros`, `realized_micros`, `unrealized_micros`, `total_return_pct`, `buy_hold_equity_micros`, `buy_hold_return_pct`, `max_drawdown_micros`, `max_drawdown_pct`, `round_trips`, `wins`, `exposure_candles` | `id` | `backtest.run_backtest` (one transaction with its fills and equity) |
+| `backtest_fills` | simulated order | `run_id`, `seq`, `signal_candle`, `signal` (up/down), `side` (buy/sell), `status` (filled / rejected / not_filled), `reason`, `quantity`, `fill_candle`, `price_micros`, `cash_after_micros`, `position_after`, `realized_after_micros` | `UNIQUE (run_id, seq)` | `backtest.run_backtest` |
+| `backtest_equity` | completed candle of a run | `run_id`, `candle_ts`, `close_micros`, `cash_micros`, `shares`, `equity_micros`, `realized_micros`, `unrealized_micros` | `PRIMARY KEY (run_id, candle_ts)` | `backtest.run_backtest` |
+
+Backtests never write the paper tables: the simulated account exists only in these rows.
 
 ### Automation and voice (Prompts 12–13)
 | Table | One row per | Key columns | Uniqueness | Written by |

@@ -351,6 +351,7 @@ class OpenAIDecisions:
     def send(self, body: dict) -> dict:
         if not self.api_key:
             raise ProviderError("OPENAI_API_KEY is not set in the backend environment")
+        body = {k: v for k, v in body.items() if k != "estimate_probabilities"}   # Claude-only option
         req = urllib.request.Request(
             f"{self.base_url}/decisions", data=json.dumps(body).encode(), method="POST",
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"})
@@ -379,8 +380,12 @@ def claude_params(body: dict) -> dict:
     Each named choice question becomes one field of a structured-output schema, limited to its choices; for
     example {"action": <one of ACTIONS>}. A chart image (input_image data URL) becomes a base64 image block in
     the same user message, before the snapshot JSON.
+
+    With body["estimate_probabilities"] (Prompt 16D), each question also gets a "<name>_probabilities" object with
+    one number per choice: Claude's OWN ESTIMATE (the Messages API returns no measured probabilities).
     """
     questions = body["questions"]
+    estimate = bool(body.get("estimate_probabilities"))
     blocks = []
     for part in body["input"][1]["content"]:
         if part["type"] == "input_text":
@@ -394,7 +399,18 @@ def claude_params(body: dict) -> dict:
     asked = "\n\n".join(
         f"Question '{q['name']}': {q['instructions']}\nAllowed answers:\n"
         + "\n".join(f"- {c['value']}: {c['description']}" for c in q["choices"]) for q in questions)
+    if estimate:
+        asked += "\n\n" + "\n".join(
+            f"Also give '{q['name']}_probabilities': your estimated probability (0 to 1) for each allowed answer of "
+            f"'{q['name']}' ({', '.join(c['value'] for c in q['choices'])}); the estimates should add up to 1."
+            for q in questions)
     blocks.append({"type": "text", "text": asked})
+    properties = {q["name"]: {"type": "string", "enum": [c["value"] for c in q["choices"]]} for q in questions}
+    if estimate:
+        for q in questions:
+            properties[f"{q['name']}_probabilities"] = {
+                "type": "object", "properties": {c["value"]: {"type": "number"} for c in q["choices"]},
+                "required": [c["value"] for c in q["choices"]], "additionalProperties": False}
     return {
         "model": body["model"],
         "max_tokens": 4000,
@@ -402,9 +418,8 @@ def claude_params(body: dict) -> dict:
         "messages": [{"role": "user", "content": blocks}],
         "thinking": {"type": "adaptive"},
         "output_config": {"effort": "low", "format": {"type": "json_schema", "schema": {
-            "type": "object",
-            "properties": {q["name"]: {"type": "string", "enum": [c["value"] for c in q["choices"]]} for q in questions},
-            "required": [q["name"] for q in questions], "additionalProperties": False}}},
+            "type": "object", "properties": properties,
+            "required": list(properties), "additionalProperties": False}}},
         # If the model declines, the API re-runs the request on a fallback model; response.model shows which ran.
         "betas": ["server-side-fallback-2026-07-01"],
         "fallbacks": "default",
@@ -449,7 +464,11 @@ class ClaudeDecisions:
 
 
 def claude_answers(message, params: dict) -> list:
-    """The structured reply as the provider-neutral answers list; an unparsable reply gives no answers."""
+    """The structured reply as the provider-neutral answers list; an unparsable reply gives no answers.
+
+    "<name>_probabilities" objects (Prompt 16D) become that answer's "probabilities": [{value, probability}] in the
+    schema's choice order; otherwise probabilities is None.
+    """
     text = "".join(b.text for b in message.content if b.type == "text")
     if message.stop_reason != "end_turn":
         return []
@@ -459,8 +478,17 @@ def claude_answers(message, params: dict) -> list:
         return []
     if not isinstance(reply, dict):
         return []
-    return [{"type": "choice", "name": name, "choice": reply[name], "probabilities": None, "confidence": None}
-            for name in params["output_config"]["format"]["schema"]["required"] if name in reply]
+    props = params["output_config"]["format"]["schema"]["properties"]
+    answers = []
+    for name in props:
+        if name.endswith("_probabilities") or name not in reply:
+            continue
+        est = reply.get(f"{name}_probabilities")
+        probabilities = ([{"value": v, "probability": est.get(v)} for v in props[name]["enum"]]
+                         if isinstance(est, dict) else None)
+        answers.append({"type": "choice", "name": name, "choice": reply[name], "probabilities": probabilities,
+                        "confidence": None})
+    return answers
 
 
 TEST_ANSWERS: str | None = None      # runtime test-double answers (SmokeTest); None = use the environment
@@ -471,10 +499,12 @@ class TestDoubleDecisions:
 
     It decodes any input_image it receives and reports the PNG's sha256 and size in its response, so a check can
     prove the provider received a decodable PNG identical to the stored capture. Answers come from
-    DECISIONS_TEST_ANSWERS, e.g. "action=buy,crossover=up,evidence=sufficient,stance=long" (default; "stance" is
-    the image-only question of Prompt 16), or from TEST_ANSWERS when
+    DECISIONS_TEST_ANSWERS, e.g. "action=buy,crossover=up,evidence=sufficient,chart_signal=long" (default;
+    "chart_signal" is the image-only question of Prompt 16A), or from TEST_ANSWERS when
     the TEST_FEED-gated /api/test/provider route has set it. "fail=provider_error" or "fail=timeout" makes the call
     fail that way. Each response also reports the symbol and candle time it received (the model boundary).
+    "<name>@p=long:0.80;short:0.05;hold:0.05;exit:0.05;wait:0.05" adds probabilities to that answer in the
+    excerpt's shape (Prompts 16D, 16E).
     """
 
     name = "test-double"
@@ -483,7 +513,9 @@ class TestDoubleDecisions:
 
     def __init__(self, answers: str | None = None):
         spec = answers if answers is not None else TEST_ANSWERS if TEST_ANSWERS is not None else os.environ.get(
-            "DECISIONS_TEST_ANSWERS", "action=buy,crossover=up,evidence=sufficient,stance=long")
+            "DECISIONS_TEST_ANSWERS",
+            "action=buy,crossover=up,evidence=sufficient,chart_signal=long,"
+            "chart_signal@p=long:0.80;short:0.05;hold:0.05;exit:0.05;wait:0.05")
         self.answers = dict(item.split("=", 1) for item in spec.split(",") if "=" in item)
         self.received = []
 
@@ -504,10 +536,16 @@ class TestDoubleDecisions:
                 except ImageRejected as exc:
                     images.append({"decodable": False, "problem": exc.problem})
         asked = [q["name"] for q in body["questions"]]
+        def probabilities(name):
+            spec = self.answers.get(f"{name}@p")
+            if spec is None:
+                return None
+            pairs = (item.split(":", 1) for item in spec.split(";") if ":" in item)
+            return [{"value": v, "probability": float(p)} for v, p in pairs]
         return {"model": self.model, "test_double": True, "received_images": images,
                 "received_snapshot": {"snapshot_id": snap.get("snapshot_id"), "symbol": snap.get("symbol"),
                                       "candle_time": (snap.get("candle") or {}).get("timestamp")},
-                "answers": [{"type": "choice", "name": n, "choice": self.answers[n], "probabilities": None,
+                "answers": [{"type": "choice", "name": n, "choice": self.answers[n], "probabilities": probabilities(n),
                              "confidence": None} for n in asked if n in self.answers]}
 
 

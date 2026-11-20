@@ -30,7 +30,12 @@ const selected = computed(() => decisions.value.find((d) => d.decision_id === se
 const utc = (iso) => (iso ? iso.replace('T', ' ').replace(/:00(\.000)?Z$/, ' UTC').replace(/Z$/, ' UTC') : '—')
 
 async function loadDecisions() {
-  const res = await fetch('/api/decisions?limit=30')
+  let res
+  try {
+    res = await fetch('/api/decisions?limit=30')
+  } catch {
+    return                          // backend unreachable: keep the list as it is (the header shows the state)
+  }
   if (!res.ok) return
   decisions.value = (await res.json()).decisions
   if (!decisions.value.some((d) => d.decision_id === selectedId.value)) selectedId.value = decisions.value[0]?.decision_id ?? null
