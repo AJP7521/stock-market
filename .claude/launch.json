@@ -43,6 +43,26 @@
         "MARKET_DB": "backend/data/test-backtest.sqlite",
         "LIVE_FEED": "off"
       }
+    },
+    {
+      "name": "backend-assistant-demo",
+      "runtimeExecutable": "/Library/Frameworks/Python.framework/Versions/3.14/bin/python3",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "backend.app:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000"
+      ],
+      "port": 8000,
+      "env": {
+        "MARKET_DB": "backend/data/test-assistant.sqlite",
+        "LIVE_FEED": "off",
+        "TEST_FEED": "on",
+        "DECISIONS_PROVIDER": "test"
+      }
     }
   ]
 }

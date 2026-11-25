@@ -30,7 +30,8 @@ Decision-linked orders (Prompt 12)
   index), and its fill copies the decision_id, so the fill, balances, P&L row and decision ID are written in the
   same transaction.
 * Immediately before such a fill, every check registered in FILL_CHECKS runs inside the fill's transaction (the
-  automation module registers: decision age, already handled, automation still running). A failing check rejects
+  automation module registers: decision age, already handled, automation still running). Rule-based automation
+  orders (origin 'automation', no decision_id; Prompt 17A) get the same hooks. A failing check rejects
   the order with its reason instead of filling it. ORDER_DECIDED hooks run in the same transaction after a fill
   or rejection (the automation module records the outcome on its run).
 
@@ -234,11 +235,12 @@ def process_observation(conn: sqlite3.Connection, observation: dict) -> list[dic
     results = []
     for order_id in pending:
         with conn:   # one transaction: recheck, fill, order status, cash and position
-            o = conn.execute("SELECT account_id, side, quantity, status, decision_id FROM paper_orders WHERE id = ?",
-                             (order_id,)).fetchone()
+            o = conn.execute("SELECT account_id, side, quantity, status, decision_id, origin FROM paper_orders "
+                             "WHERE id = ?", (order_id,)).fetchone()
             if o is None or o[3] != "pending":
                 continue
             account_id, side, qty, decision_id = o[0], o[1], o[2], o[4]
+            hooked = decision_id is not None or o[5] == "automation"   # AI or rule-based automation order
             cash = conn.execute("SELECT cash_micros FROM paper_accounts WHERE id = ?", (account_id,)).fetchone()[0]
             held = _position(conn, account_id, symbol)
             if side == "close":
@@ -250,7 +252,7 @@ def process_observation(conn: sqlite3.Connection, observation: dict) -> list[dic
                           f"{dollars(cost):.2f} > {dollars(cash):.2f}")
             elif side in ("sell", "close") and (qty <= 0 or qty > held):
                 reason = f"insufficient shares at fill: need {qty}, hold {held}"
-            if reason is None and decision_id is not None:
+            if reason is None and hooked:
                 order = {"id": order_id, "account_id": account_id, "symbol": symbol, "side": side,
                          "decision_id": decision_id}
                 reason = next((r for r in (check(conn, order, received) for check in FILL_CHECKS) if r), None)
@@ -277,7 +279,7 @@ def process_observation(conn: sqlite3.Connection, observation: dict) -> list[dic
                  observation["source_time_ms"], received, new_cash, new_pos, decision_id))
             fill_id = conn.execute("SELECT id FROM paper_fills WHERE order_id = ?", (order_id,)).fetchone()[0]
             record_fill(conn, fill_id)     # P&L row and cost basis in the same transaction as the fill
-            if decision_id is not None:
+            if hooked:
                 for hook in ORDER_DECIDED:
                     hook(conn, order_id, "filled", fill_id, None)
         results.append(_order(conn, order_id))

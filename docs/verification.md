@@ -1265,3 +1265,68 @@ Observed in passing (existing, not changed here): on a brand-new database the fi
 
 Not checked: a backtest on live-recorded Yahoo data (none recorded in this session's databases); replay mode with the
 backtest panel (it uses the replay symbol but always backtests all stored candles, not the replay position).
+
+## Prompt 17A · Rule-based switch for Paper automation (2026-11-19)
+
+New: automation mode `ai` / `rule` (`automation_state.mode`, `automation_runs.mode`, `automation_runs.rule_action`,
+added with `ALTER TABLE` if missing, tolerating a concurrent add); `automation.rule_action` / `rule_run` (decides
+from the frozen snapshot, no image, no model); `fill_check` handles automation orders without a decision ID (age
+from the run's snapshot); `paper.process_observation` runs the hooks for every `origin = 'automation'` order;
+`POST /api/automation/start` takes `mode`; AI/Rule radio buttons, rule note, Mode column in `AutomationPanel.vue`.
+No dependency changes.
+
+### Checks (all on **test data**; no live provider involved)
+| Check | Command | Expected | Observed |
+|---|---|---|---|
+| Existing tests with the new backend | `python3 -m unittest discover -s backend/tests -t .` (before the new tests) | OK | **145 tests, OK** |
+| Rule-mode tests (up crossover buys and fills at the next price, no crossover holds, down crossover closes, realized −$9; no `decisions` row; same candle twice → one order; Stop before fill rejects; fill 330 s after the decision time rejected as too old; AI still the default; unknown mode refused) | `python3 -m unittest backend.tests.test_automation_rule -v` | OK | **6 tests, OK** |
+| Full unit suite | `python3 -m unittest discover -s backend/tests -t .` | OK | **151 tests, OK** |
+| Frontend build | `npm --prefix frontend run build` | builds | **built** |
+| SmokeTest with check 3b (TESTRULE: Rule radio, order size 2, Start; up crossover → buy 2 @ $100, down crossover → close 2 @ $50; runs table shows rule/buy/filled and rule/close/filled; no decision added; Stop) | `python3 -m backend.smoke` | PASS | **PASS 93/93** (`smoke-20261119-215213`), all 11 rule checks pass on the first run |
+
+## Prompt 18 · Trading assistant chatbot in a side panel (2026-11-19)
+
+New: `backend/assistant.py` (Claude in a manual tool-use loop over read-only tools, `give_answer` with an optional
+recommendation, Python check, place only on click), `/api/assistant/*`, `frontend/src/AssistantPanel.vue` (side
+panel, "Ask assistant" toggle in the top bar), tables `assistant_sessions` and `assistant_turns`, launch
+configuration `backend-assistant-demo` (test database, `LIVE_FEED=off`, `TEST_FEED=on`, `DECISIONS_PROVIDER=test`).
+No dependency changes. **No live Claude call was made**: all checks below use the test double or a stubbed client.
+
+### Mocked checks (test double or stubbed client, **test data**)
+| Check | Command | Expected | Observed |
+|---|---|---|---|
+| Assistant tests (tools equal the underlying functions; action question → BUY 1, check passes, test data flagged, no order; general question → no recommendation; Place twice → one order, origin `assistant`; Place re-checks at click time; check gates; Claude loop with a stubbed client sends the tool result back and returns `give_answer`) | `python3 -m unittest backend.tests.test_assistant -v` | OK | first run **1 failure**: data age −30.3 s. The age query counted observations received after the (test) clock, a look-ahead leak. AutoLoop cycle 1: count only observations received by now. Second run: age 9.7 s against the test's 10.0 (the fixture receives 0.3 s after the source time); test expectation corrected. **7 tests, OK** |
+| Full unit suite | `python3 -m unittest discover -s backend/tests -t .` | OK | **158 tests, OK** |
+| Browser pane (`backend-assistant-demo`, clock 2026-11-09T15:17:20Z, TESTBT, SMA 2/4) | open the panel, ask, Place twice, general question, 1400 px width | BUY 1, "can be placed", one order, same order on the second click, no card for the general question | **as expected**: "BUY 1", order #1 buy 1 TESTBT pending (origin assistant), second click "Already placed: order #1"; the general question was answered with no card; the panel is 420 px at desktop width and full width on a narrow pane. Fixed during the check: "BUY1" spacing and the header wrapping |
+| Frontend build | `npm --prefix frontend run build` | builds | **built** |
+| SmokeTest with check 5 | `python3 -m backend.smoke` | PASS | **PASS 102/102** (`smoke-20261119-220258`), all 9 assistant checks pass on the first run |
+
+Not checked: a live Claude answer (needs the student's go-ahead to use the `.env` key); the strict `give_answer`
+schema against the live API; voice input (not in scope).
+
+### Live check (Claude, **live Yahoo data** on the real database, 2026-11-20 ~03:08 UTC, the student's go-ahead)
+Backend `backend` (real `market.sqlite`, live feed on, `DECISIONS_PROVIDER=claude`), AAPL 1m, SMA 5/20, side panel.
+| Question | Observed |
+|---|---|
+| "Should I buy or sell now?" | status ok, `claude-opus-5-5`, 26.6 s. Tools: market state, account, strategy signal, backtest, recent AI decisions. **WAIT**, confidence 0.65 (model estimate), 4 reasons, 2 points against. Python check: no order needed. The reply put stale data first (latest observation about 436 s old against the 300 s limit; feed subscribed, no messages; after-hours candles without volume). It quoted SMA5 351.832 > SMA20 350.930 with the up crossover at 02:55, not at the last candle, so the rule says wait; a backtest of 74 candles at +0.20% against buy and hold +0.72% with 2 trades; and the data gap from Nov 17 to Nov 20. It gave the case for buying and said this is a simulation, not advice. |
+| "What is a stop-loss order, and does this app support one?" | status ok, 14.1 s, one tool (account), **no recommendation** (correct for a general question). The general explanation was labelled as general knowledge. It correctly found that the app has only buy, sell and close orders (no stop price) and suggested a manual exit price instead. |
+
+Stored: 1 session (`call_kind live`), 2 answers with their tool calls; 1 backtest run (from the tool); **0 assistant orders** (Place was not clicked).
+The strict `give_answer` schema was accepted by the live API.
+
+Found: replies use Markdown (`**bold**`, `- ` lists), which the panel showed as raw characters. Fix:
+`frontend/src/chatText.js` HTML-escapes the reply first and then renders only bold, bullet lists and paragraphs.
+Checked in the page on both stored live replies: 10 and 13 bold spans, 4 and 10 list items, no raw `**` left. An
+injection test (`<img onerror>`, `<script>`) came out as escaped text. Frontend build OK. Not checked: how the
+formatted reply looks on screen (asking again would need another live call).
+
+### Live check 2 (Claude, **live Yahoo data** on the real database, 2026-11-25 ~02:57 UTC, the student's request)
+Backend `backend` (real `market.sqlite`, live feed subscribed to AAPL, `DECISIONS_PROVIDER=claude` from `.env`),
+frontend `frontend`, both started from the browser pane; no console errors. AAPL 1m, SMA 5/20, side panel.
+| Question | Observed |
+|---|---|
+| "Should I buy or sell AAPL?" | `claude-opus-5-5`, 29.5 s, 5 tool calls. **WAIT**, confidence 65% (model estimate). Sell not possible (0 shares, $1,000 cash, long only). Buy: SMA5 351.64 > SMA20 351.3192 with no fresh crossover (last up crossover 2026-11-20 02:55 UTC); data 39 s old (not stale), but the last 20 1m candles span Nov 17, 20 and 25, outside regular hours, no volume; backtest 82 candles +0.46% vs buy and hold +0.97%, 2 round trips. Gave the case against and what would change it. Python check: no order needed. **0 orders** (Place not clicked). |
+
+The panel text of this live reply contained no raw `**` or `- ` Markdown markers (read from the page's text, not a screenshot).
+Unit tests rerun the same day: `python3 -m unittest backend.tests.test_assistant` → **7 tests, OK**.
+Screen recording of this session added as `docs/media/live-chatbot.mov` (1 min 5 s, 31.1 MB) and linked from `report.md`.

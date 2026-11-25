@@ -4,6 +4,8 @@
 // PNG with the same chart capture as "Ask about chart", and the analyst + reviewer decide. Only an eligible,
 // approved decision becomes a paper order; the fill happens at the next observed price after Python's rechecks.
 // Stop disables new executions, including a model reply still pending. Trace follows one decision ID end to end.
+// Rule mode (Prompt 17A): the fixed SMA crossover rule decides in Python when the candle is claimed; no chart capture
+// and no model call. The backend returns the run already decided, so this panel skips the capture step.
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import CandleChart from './CandleChart.vue'
 import { backendFetch, createPoller } from './backend.js'
@@ -23,6 +25,7 @@ const renderKey = ref(0)
 const previewRef = ref(null)
 const trace = ref(null)
 const orderSize = ref(1)          // shares for buy and sell while running (close sells the whole position)
+const mode = ref('ai')            // 'ai' (analyst + reviewer) or 'rule' (fixed SMA crossover rule)
 const attempted = new Set()       // candles this page already tried (the backend also deduplicates)
 let working = false
 
@@ -47,7 +50,7 @@ async function refresh() {
 async function start() {
   message.value = ''
   attempted.clear()
-  try { view.value = await post('/api/automation/start', { ...params.value, order_size: orderSize.value }) }
+  try { view.value = await post('/api/automation/start', { ...params.value, order_size: orderSize.value, mode: mode.value }) }
   catch (e) { message.value = e.message }
 }
 
@@ -141,10 +144,16 @@ watch(params, () => { attempted.clear(); trace.value = null; poller.now() })
 
 <template>
   <section class="auto card" data-testid="automation">
-    <h2>Paper automation (analyst + reviewer → paper account)</h2>
+    <h2>Paper automation ({{ (running ? view.state.mode : mode) === 'rule' ? 'SMA crossover rule' : 'analyst + reviewer' }} → paper account)</h2>
     <p v-if="offline" class="bad" data-testid="auto-offline">Backend unreachable: showing the last state received;
       retrying less often until it answers.</p>
     <div class="controls">
+      <span class="modes" role="radiogroup" aria-label="Decision mode">
+        <label><input v-model="mode" type="radio" value="ai" :disabled="running" data-testid="auto-mode-ai" />
+          AI (analyst + reviewer)</label>
+        <label><input v-model="mode" type="radio" value="rule" :disabled="running" data-testid="auto-mode-rule" />
+          Rule (SMA crossover)</label>
+      </span>
       <label>Order size
         <input v-model.number="orderSize" type="number" min="1" step="1" :disabled="running" style="width:4em"
                data-testid="auto-order-size" /></label>
@@ -152,7 +161,8 @@ watch(params, () => { attempted.clear(); trace.value = null; poller.now() })
       <button type="button" :disabled="!running" data-testid="auto-stop" @click="stop">Stop</button>
       <strong data-testid="auto-state" :class="running ? 'ok' : 'muted'">{{ running ? 'Running' : 'Stopped' }}</strong>
       <span class="hint">{{ symbol }} · {{ timeframe }} · strategy sma{{ smaShort }}x{{ smaLong }}
-        <template v-if="view?.state"> · generation {{ view.state.generation }} · order size
+        <template v-if="view?.state"> · mode <span data-testid="auto-state-mode">{{ view.state.mode }}</span>
+          · generation {{ view.state.generation }} · order size
           <span data-testid="auto-state-order-size">{{ view.state.order_size }}</span>
           · started {{ view.state.started_at ?? '—' }}</template>
         · decisions older than {{ view?.max_decision_age_s ?? '—' }} s are not filled</span>
@@ -167,6 +177,10 @@ watch(params, () => { attempted.clear(); trace.value = null; poller.now() })
       · starting cash {{ money(view.account.starting_cash) }}
     </p>
     <p v-if="message" class="bad" data-testid="auto-message">{{ message }}</p>
+    <p v-if="(running ? view.state.mode : mode) === 'rule'" class="hint" data-testid="auto-rule-note">
+      Rule: upward crossover with no shares → buy the order size; downward crossover with shares → close the whole
+      position; otherwise hold or wait (no order). Decided in Python from the frozen snapshot; no chart image, no model
+      call. Fills at the next observed price with the same pre-fill checks.</p>
 
     <div v-if="snapshot" class="offscreen" aria-hidden="true">
       <CandleChart ref="previewRef" :key="renderKey" :rows="snapshot.chart.candles" :sma="snapshot.chart.sma"
@@ -175,18 +189,19 @@ watch(params, () => { attempted.clear(); trace.value = null; poller.now() })
 
     <table v-if="view?.runs?.length" class="runs" data-testid="auto-runs">
       <thead>
-        <tr><th>Candle</th><th>Decision</th><th>Crossover</th><th>Proposal</th><th>Verdict</th><th>Eligible</th>
+        <tr><th>Candle</th><th>Mode</th><th>Decision</th><th>Crossover</th><th>Proposal / rule</th><th>Verdict</th><th>Eligible</th>
           <th>Model calls</th><th>Outcome</th><th>Reason</th><th></th></tr>
       </thead>
       <tbody>
         <tr v-for="r in view.runs" :key="r.id" :data-testid="`auto-run-${r.candle_ts}`">
           <td>{{ utc(r.candle_ts) }}</td>
+          <td :data-testid="`auto-mode-${r.candle_ts}`">{{ r.mode }}</td>
           <td>{{ r.decision_id ? `#${r.decision_id}` : '—' }}</td>
           <td>{{ r.crossover ?? '—' }}</td>
-          <td>{{ r.proposal ?? '—' }}</td>
+          <td :data-testid="`auto-proposal-${r.candle_ts}`">{{ r.proposal ?? '—' }}</td>
           <td>{{ r.verdict ?? '—' }}</td>
           <td>{{ r.eligible === null ? '—' : r.eligible ? 'yes' : 'no' }}</td>
-          <td :class="r.call_kind === 'mock' ? 'warn' : ''">{{ r.call_kind === 'mock' ? 'MOCK' : r.call_kind ?? '—' }}</td>
+          <td :class="r.call_kind === 'mock' ? 'warn' : ''">{{ r.mode === 'rule' ? 'none' : r.call_kind === 'mock' ? 'MOCK' : r.call_kind ?? '—' }}</td>
           <td :data-testid="`auto-outcome-${r.candle_ts}`"><strong>{{ outcome(r) }}</strong></td>
           <td class="hint">{{ r.reason ?? '' }}</td>
           <td><button v-if="r.decision_id" type="button" :data-testid="`auto-trace-${r.decision_id}`"
@@ -241,6 +256,7 @@ watch(params, () => { attempted.clear(); trace.value = null; poller.now() })
 
 <style scoped>
 .controls { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+.modes { display: inline-flex; gap: 0.75rem; }
 .hint { font-size: 0.8rem; color: #666; }
 .acct { font-size: 0.9rem; }
 .offscreen { position: absolute; left: -10000px; top: 0; width: 800px; }

@@ -27,6 +27,20 @@ arrives, and pending automation orders are rejected.
 Run statuses: analysing, failed_analysis, skipped (not eligible / not approved), stopped, no_order (approved hold
 or wait), order_pending, filled, rejected (at submission or fill recheck).
 
+Rule-based mode (Prompt 17A)
+----------------------------
+start(mode="rule") runs the fixed SMA crossover rule instead of the analyst and reviewer. claim_run() still claims
+the candle once and freezes the same snapshot; then rule_run() decides in Python from that snapshot only (the
+crossover at the completed candle and the automation account's position), with no chart image and no model call:
+
+  upward crossover, no shares      -> buy order_size shares
+  downward crossover, shares held  -> close (sell the whole position)
+  anything else                    -> hold (shares held) or wait (flat): no order
+
+The order goes through the same execution function, fills at the next observed price and gets the same pre-fill
+rechecks (decision age from the snapshot's decision time, automation still running, cash/shares). The run records
+mode = 'rule' and rule_action; decision_id stays NULL because no model decision exists.
+
 Snapshots whose market data is labelled test go to the disposable test account (PAPER_TEST_ACCOUNT); others go to
 the main paper account. A manual chart question has no run, so apply_decision() refuses it.
 """
@@ -36,7 +50,7 @@ import sqlite3
 
 from backend import paper
 from backend.candles import iso_ms
-from backend.decisions import create_snapshot, decide, get_decision
+from backend.decisions import create_snapshot, decide, get_decision, load_snapshot
 from backend.paper import account_state, execute, open_account
 from backend.recorder import now_ms
 from backend.series import candle_series, data_sources
@@ -56,6 +70,7 @@ CREATE TABLE IF NOT EXISTS automation_state (
     long         INTEGER NOT NULL,
     account_id   TEXT NOT NULL,
     order_size   INTEGER NOT NULL DEFAULT 1,     -- shares for buy and sell (close sells the whole position)
+    mode         TEXT NOT NULL DEFAULT 'ai',      -- 'ai' (analyst + reviewer) or 'rule' (fixed crossover rule)
     enabled      INTEGER NOT NULL,
     generation   INTEGER NOT NULL,
     started_ms   INTEGER,
@@ -76,6 +91,8 @@ CREATE TABLE IF NOT EXISTS automation_runs (
     decision_id   INTEGER,
     order_id      INTEGER,
     fill_id       INTEGER,
+    mode          TEXT NOT NULL DEFAULT 'ai',     -- mode at claim time
+    rule_action   TEXT,                           -- rule mode: buy / close / hold / wait
     created_ms    INTEGER NOT NULL,
     updated_ms    INTEGER NOT NULL,
     UNIQUE (account_id, strategy, symbol, interval, candle_ts)
@@ -87,12 +104,26 @@ class AutomationError(ValueError):
     pass
 
 
+MODES = ("ai", "rule")
+
+
+def _add_column(conn, table: str, column: str, ddl: str) -> None:
+    if column not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            conn.commit()
+        except sqlite3.OperationalError as exc:      # added by a concurrent request in the meantime
+            if "duplicate column" not in str(exc):
+                raise
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     paper.ensure_schema(conn)
     conn.executescript(SCHEMA)
-    if "order_size" not in {r[1] for r in conn.execute("PRAGMA table_info(automation_state)")}:
-        conn.execute("ALTER TABLE automation_state ADD COLUMN order_size INTEGER NOT NULL DEFAULT 1")
-        conn.commit()
+    _add_column(conn, "automation_state", "order_size", "INTEGER NOT NULL DEFAULT 1")
+    _add_column(conn, "automation_state", "mode", "TEXT NOT NULL DEFAULT 'ai'")
+    _add_column(conn, "automation_runs", "mode", "TEXT NOT NULL DEFAULT 'ai'")
+    _add_column(conn, "automation_runs", "rule_action", "TEXT")
 
 
 def strategy_name(short: int, long: int) -> str:
@@ -119,10 +150,15 @@ def state(conn, symbol: str, interval: str, short: int, long: int) -> dict | Non
 
 
 def start(conn, symbol: str, interval: str, short: int, long: int, *, paper_account: str, test_account: str,
-          test_starting_cash: float, order_size: int = 1, at_ms: int | None = None) -> dict:
-    """Enable automation (a new generation). `order_size` is used for buy and sell orders until the next Start."""
+          test_starting_cash: float, order_size: int = 1, mode: str = "ai", at_ms: int | None = None) -> dict:
+    """Enable automation (a new generation). `order_size` is used for buy and sell orders until the next Start.
+
+    mode "ai": analyst + reviewer decide; mode "rule": the fixed SMA crossover rule decides (rule_run).
+    """
     if isinstance(order_size, bool) or not isinstance(order_size, int) or order_size < 1:
         raise AutomationError("order size must be a positive whole number of shares")
+    if mode not in MODES:
+        raise AutomationError(f"mode must be one of {', '.join(MODES)} (got {mode!r})")
     ensure_schema(conn)
     at_ms = at_ms if at_ms is not None else now_ms()
     account = account_for(conn, symbol, paper_account, test_account)
@@ -132,10 +168,12 @@ def start(conn, symbol: str, interval: str, short: int, long: int, *, paper_acco
     with conn:
         conn.execute(
             """INSERT INTO automation_state (key, strategy, symbol, interval, short, long, account_id, order_size,
-                   enabled, generation, started_ms, stopped_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, NULL)
+                   mode, enabled, generation, started_ms, stopped_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, NULL)
                ON CONFLICT (key) DO UPDATE SET enabled = 1, generation = generation + 1, account_id = excluded.account_id,
-                   order_size = excluded.order_size, started_ms = excluded.started_ms, stopped_ms = NULL""",
-            (_key(strategy, symbol, interval), strategy, symbol, interval, short, long, account, order_size, at_ms))
+                   order_size = excluded.order_size, mode = excluded.mode, started_ms = excluded.started_ms,
+                   stopped_ms = NULL""",
+            (_key(strategy, symbol, interval), strategy, symbol, interval, short, long, account, order_size, mode,
+             at_ms))
     return state(conn, symbol, interval, short, long)
 
 
@@ -219,9 +257,9 @@ def claim_run(conn, symbol: str, interval: str, short: int, long: int, candle_ti
         try:
             run_id = conn.execute(
                 """INSERT INTO automation_runs (account_id, strategy, symbol, interval, candle_ts, generation, status,
-                       created_ms, updated_ms) VALUES (?, ?, ?, ?, ?, ?, 'analysing', ?, ?)""",
-                (st["account_id"], st["strategy"], symbol, interval, candle_time, st["generation"], at_ms,
-                 at_ms)).lastrowid
+                       mode, created_ms, updated_ms) VALUES (?, ?, ?, ?, ?, ?, 'analysing', ?, ?, ?)""",
+                (st["account_id"], st["strategy"], symbol, interval, candle_time, st["generation"], st["mode"],
+                 at_ms, at_ms)).lastrowid
         except sqlite3.IntegrityError:          # claimed concurrently
             run_id = conn.execute(
                 "SELECT id FROM automation_runs WHERE account_id = ? AND strategy = ? AND symbol = ? AND "
@@ -235,7 +273,54 @@ def claim_run(conn, symbol: str, interval: str, short: int, long: int, candle_ti
         conn.execute("UPDATE automation_runs SET snapshot_id = ? WHERE id = ?", (snap["snapshot_id"], run_id))
         if not snap["complete"]:
             _set(conn, run_id, "failed_analysis", "incomplete snapshot: " + "; ".join(snap["missing"]), at_ms)
+    if snap["complete"] and st["mode"] == "rule":
+        rule_run(conn, run_id, snap, at_ms)          # no image, no model: decided now from the frozen snapshot
     return {"created": True, "run": get_run(conn, run_id), "snapshot": snap}
+
+
+def rule_action(snapshot: dict) -> tuple[str, str]:
+    """The fixed SMA crossover rule on one frozen snapshot. Returns (action, reason). Uses nothing else."""
+    crossover = snapshot["indicators"]["crossover_at_candle"]
+    held = snapshot["account"]["position"]
+    short, long = snapshot["indicators"]["sma_short_window"], snapshot["indicators"]["sma_long_window"]
+    what = f"SMA{short}/SMA{long} crossover at the candle: {crossover}; {held} share(s) held"
+    if crossover == "up" and held == 0:
+        return "buy", f"rule: {what} -> buy {snapshot['account']['order_size']}"
+    if crossover == "down" and held > 0:
+        return "close", f"rule: {what} -> close the position"
+    action = "hold" if held > 0 else "wait"
+    return action, f"rule: {what} -> {action}, no order"
+
+
+def rule_run(conn, run_id: int, snapshot: dict, at_ms: int | None = None) -> dict:
+    """Rule mode: decide from the run's frozen snapshot and place at most one paper order (idempotent)."""
+    at_ms = at_ms if at_ms is not None else now_ms()
+    run = get_run(conn, run_id)
+    if run is None:
+        raise AutomationError(f"no automation run {run_id}")
+    if run["status"] != "analysing":
+        return run
+    if not _enabled_generation(conn, run):
+        with conn:
+            _set(conn, run_id, "stopped", "automation stopped before the rule ran", at_ms)
+        return get_run(conn, run_id)
+    action, reason = rule_action(snapshot)
+    if action in ("hold", "wait"):
+        with conn:
+            _set(conn, run_id, "no_order", reason, at_ms, rule_action=action)
+        return get_run(conn, run_id)
+    request_id = f"auto:{run['account_id']}:{run['strategy']}:{run['symbol']}:{run['interval']}:{run['candle_ts']}"
+    result = execute(conn, run["account_id"], run["symbol"], action,
+                     snapshot["account"]["order_size"] if action == "buy" else None,
+                     request_id, at_ms, origin="automation")
+    order = result["order"]
+    with conn:
+        if order["status"] == "rejected":
+            _set(conn, run_id, "rejected", order["reason"], at_ms, order_id=order["id"], rule_action=action)
+        else:
+            _set(conn, run_id, "order_pending", f"{reason}; pending until the next observed price", at_ms,
+                 order_id=order["id"], rule_action=action)
+    return get_run(conn, run_id)
 
 
 def fail_run(conn, run_id: int, reason: str, at_ms: int | None = None) -> dict:
@@ -339,18 +424,28 @@ def _order_or_none(conn, order_id):
 # --------------------------------------------------------------------------- simulator hooks
 
 def fill_check(conn, order: dict, received_ms: int) -> str | None:
-    """Recheck a decision-linked order immediately before its fill (inside the fill transaction)."""
+    """Recheck an automation order immediately before its fill (inside the fill transaction).
+
+    AI mode: the order carries a decision_id. Rule mode: no decision; the age comes from the run's snapshot.
+    """
     try:
-        run = conn.execute("SELECT id, strategy, symbol, interval, generation FROM automation_runs "
+        run = conn.execute("SELECT id, strategy, symbol, interval, generation, snapshot_id FROM automation_runs "
                            "WHERE order_id = ?", (order["id"],)).fetchone()
     except sqlite3.OperationalError:
         run = None
-    if conn.execute("SELECT 1 FROM paper_fills WHERE decision_id = ?", (order["decision_id"],)).fetchone():
-        return f"decision {order['decision_id']} was already filled"
-    snap = conn.execute("SELECT s.decision_ms FROM decisions d JOIN decision_snapshots s ON s.id = d.snapshot_id "
-                        "WHERE d.id = ?", (order["decision_id"],)).fetchone()
-    if snap is None:
-        return f"decision {order['decision_id']} not found"
+    if order.get("decision_id") is not None:
+        if conn.execute("SELECT 1 FROM paper_fills WHERE decision_id = ?", (order["decision_id"],)).fetchone():
+            return f"decision {order['decision_id']} was already filled"
+        snap = conn.execute("SELECT s.decision_ms FROM decisions d JOIN decision_snapshots s ON s.id = d.snapshot_id "
+                            "WHERE d.id = ?", (order["decision_id"],)).fetchone()
+        if snap is None:
+            return f"decision {order['decision_id']} not found"
+    else:
+        if run is None:
+            return None                         # not an automation order
+        snap = conn.execute("SELECT decision_ms FROM decision_snapshots WHERE id = ?", (run[5],)).fetchone()
+        if snap is None:
+            return f"snapshot of automation run {run[0]} not found"
     age_s = (received_ms - snap[0]) / 1000
     if age_s > DECISION_MAX_AGE_S:
         return f"decision too old at fill: {age_s:.0f} s after the candle completed (limit {DECISION_MAX_AGE_S:.0f} s)"
@@ -393,8 +488,12 @@ def runs(conn, symbol: str, interval: str, short: int, long: int, limit: int = 3
     out = []
     for run in (get_run(conn, i) for i in ids):
         d = get_decision(conn, run["decision_id"]) if run["decision_id"] else None
-        out.append({**run, "crossover": (d["backend_facts"].get("crossover_at_candle") if d else None),
-                    "proposal": d["model_proposal"]["action"] if d else None,
+        crossover = d["backend_facts"].get("crossover_at_candle") if d else None
+        if run["mode"] == "rule" and run["snapshot_id"]:
+            snap = load_snapshot(conn, run["snapshot_id"])
+            crossover = snap["indicators"]["crossover_at_candle"] if snap else None
+        out.append({**run, "crossover": crossover,
+                    "proposal": d["model_proposal"]["action"] if d else run["rule_action"],
                     "verdict": (d.get("review") or {}).get("verdict") if d else None,
                     "eligible": d["eligible_for_order"] if d else None,
                     "call_kind": d["call_kind"] if d else None})

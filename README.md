@@ -14,6 +14,7 @@ The finished workstation should let a student:
   live or in replay
 - trade a local, long-only **paper** account and read its realized/unrealized P&L
 - backtest the SMA crossover rule on stored candles (no look-ahead) and read its trades, performance and limits
+- ask a trading assistant anything, and get a checked buy/sell/hold recommendation for the paper account
 - ask an AI analyst about a chart snapshot, have a second agent review the proposal,
   and optionally apply approved decisions to the paper account
 - discuss a recorded decision by voice
@@ -68,6 +69,7 @@ stock-market/
 |   |-- paper.py              Long-only paper account: one execution function, next-price fills
 |   |-- pnl.py                P&L history: weighted average cost, fills and candle valuations
 |   |-- backtest.py           SMA crossover backtest: next-open fills, stored runs, interpretation
+|   |-- assistant.py          Trading assistant chatbot: Claude + read-only tools, checked recommendations
 |   |-- fixtures.py           Labelled test fixtures in a separate SQLite file
 |   |-- candles.py            One-minute candles from stored observations
 |   |-- timeframes.py         5m/15m/1h/1d candles from one-minute candles
@@ -219,14 +221,44 @@ chosen, not tested on held-back data), how real fees, slippage and spreads would
 position will be worth. Test and synthetic data say nothing about real markets. Past simulated results do not predict
 future results.
 
+### Trading assistant (side panel)
+
+Click **Ask assistant** in the top bar to open the chat on the right. Ask anything: how the app works, what an
+indicator means, a general trading question, or "Should I buy or sell now?". Answers about the chart use the app's own
+data through read-only tools (market state, paper account, the crossover rule's current action, a backtest, recent AI
+decisions); expand **Data used** under an answer to see every tool call and result.
+
+When you ask what to do, the answer includes a **recommendation for the paper account**:
+- an action (buy, sell, close, hold or wait) and a quantity
+- a confidence, which is the model's own estimate
+- the reasons with their evidence, the case against, and what would change it
+
+Python then checks the recommendation against the account and shows each check: enough cash, shares held (long only),
+a whole quantity, a completed candle, and data younger than `ASSISTANT_STALE_S` (300 s). **Nothing trades from the
+chat.** **Place this paper order** re-checks at that moment and sends the order through the normal paper execution;
+it fills at the next observed price like any manual order. Clicking it again returns the same order. **New chat**
+starts over; changing the symbol or timeframe also starts a new chat.
+
+It uses Claude with `ANTHROPIC_API_KEY` from `.env` (model `ASSISTANT_MODEL`, default `claude-opus-5-5`).
+`DECISIONS_PROVIDER=test` swaps in a labelled test double that calls the real tools and recommends the crossover
+rule's action. To try it with test data and no model or Yahoo connection, start the `backend-assistant-demo` launch
+configuration (`backend/data/test-assistant.sqlite`, made with `python3 -m backend.fixtures backtest --db
+backend/data/test-assistant.sqlite`). Then set the test clock so the TESTBT data is fresh:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/test/clock -H 'Content-Type: application/json' -d '{"time":"2026-11-09T15:17:20Z"}'
+```
+
+Open `?symbol=TESTBT&interval=1m` with SMA 2/4. This is a simulation for a course, not financial advice.
+
 ### Simulation assumptions (paper account and backtest)
 
 | | Paper account (manual and automation) | Backtest |
 |---|---|---|
-| Who decides | you (buttons) or the reviewed AI decision | fixed SMA crossover rule |
+| Who decides | you (buttons, or **Place this paper order** on an assistant recommendation), the reviewed AI decision, or the fixed SMA crossover rule (automation rule mode) | fixed SMA crossover rule |
 | Information used | the price at the moment of the order | only candles completed by the decision time |
 | Fill price | next observed price after the order | open of the next completed candle (an overnight gap counts) |
-| Quantity | whole shares you enter (`PAPER_ORDER_SIZE` for automation); close = whole position | as many whole shares as cash allows; sell = whole position |
+| Quantity | whole shares you enter (the automation order size); close = whole position (rule mode closes on a downward crossover) | as many whole shares as cash allows; sell = whole position |
 | Unfillable | rejected at fill if cash or shares no longer suffice | buy rejected if cash buys no share; a signal on the last candle stays "not filled" |
 | Costs | zero fees and commissions | zero fees and commissions |
 | Not modelled | slippage, bid/ask spread, partial fills, market impact, short selling, margin, dividends, splits, interest on cash | the same |
@@ -290,6 +322,14 @@ otherwise the reason is recorded. **Stop** disables new executions: a model repl
 executed, and pending automation orders are rejected. Market data labelled **test** trades only in the disposable
 `PAPER_TEST_ACCOUNT` (default `paper-test`, `PAPER_TEST_STARTING_CASH` 1000). A manual chart question never creates an
 order.
+
+**Rule mode (Prompt 17A).** Before Start, choose **AI (analyst + reviewer)**, the default described above, or **Rule
+(SMA crossover)**. In rule mode, the same claim and frozen snapshot are used, but Python decides from the snapshot
+alone, with no chart image and no model call. An upward crossover with no shares buys the order size; a downward
+crossover with shares held closes the whole position; anything else is hold or wait (no order). The order fills at
+the next observed price with the same pre-fill checks (age, still running, cash and shares). The runs table shows
+the mode and the rule's action; rule runs have no decision ID, so there is no Trace. The backtest uses the same
+crossover rule but buys with all available cash and fills at the next candle's open.
 
 Each run's **Trace** button follows one decision ID: crossover → analyst proposal → reviewer verdict → Python final
 check → order and fill (or skip reason) → account state. The same data is at `GET /api/automation/trace/{decision_id}`.
@@ -556,9 +596,12 @@ no fill, then a provider failure on screen; (2b) the chart-only decision: only t
 the answer on screen matches SQLite, Python's expected answer and the marker list, no order, fill or decision is added, then a timeout on
 screen; (3) paper automation on a test clock: buy 4 @ $100, sell 1 @ $110, close
 3 @ $105 → $1,025, 0 shares, $25 realized, $0 unrealized, with a veto, a duplicate and a candle after Stop adding no
-fill or order; (4) a backtest of the labelled TESTBT fixture with SMA 2/4: the summary tiles, the five orders and
+fill or order; (3b) rule-mode automation on TESTRULE: the up crossover buys 2 @ $100 and the down crossover closes
+2 @ $50, with no chart capture and no model decision; (4) a backtest of the labelled TESTBT fixture with SMA 2/4: the summary tiles, the five orders and
 fills, and the stored `backtest_runs` / `backtest_fills` rows match a hand calculation ($941.50, −5.85%, buy and hold
-+20%, drawdown 23.26%), and the paper account is untouched. It exits 1 if any expected result is missing, writes `test-results/smoke-<time>/report.md` (plus a
++20%, drawdown 23.26%), and the paper account is untouched; (5) the assistant side panel with the test double: "Should I
+buy or sell now?" gives BUY 1 that can be placed and no order until Place, Place creates one assistant order and a
+second click returns the same one, and a general question gets no recommendation card. It exits 1 if any expected result is missing, writes `test-results/smoke-<time>/report.md` (plus a
 screenshot, logs and the database on failure), and stops the browser and every process it started, also on failure.
 `SMOKE_HEADED=1` shows the browser; `SMOKE_BROWSER_CHANNEL=` (empty) uses Playwright's own Chromium instead of Chrome.
 GitHub Actions runs the same command on every push (`.github/workflows/smoke.yml`), offline, without credentials.

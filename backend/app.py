@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from backend.candles import iso_ms
 from backend import automation  # noqa: E402  (also registers the simulator's pre-fill checks)
+from backend import assistant  # noqa: E402
 from backend import backtest  # noqa: E402
 from backend import voice  # noqa: E402
 from backend.chart_images import ImageRejected, stored_path
@@ -669,6 +670,7 @@ class AutomationIn(BaseModel):
     short: int = 5
     long: int = 20
     order_size: int | None = Field(None, ge=1, le=1_000_000)   # Start only; default PAPER_ORDER_SIZE
+    mode: Literal["ai", "rule"] = "ai"   # Start only: analyst + reviewer, or the fixed SMA crossover rule (17A)
 
 
 def _automation_view(conn, body_symbol: str, timeframe: str, short: int, long: int) -> dict:
@@ -683,14 +685,14 @@ def _automation_view(conn, body_symbol: str, timeframe: str, short: int, long: i
 
 @app.post("/api/automation/start")
 def automation_start(body: AutomationIn) -> dict:
-    """Enable paper automation for one symbol, interval and SMA strategy (a new generation)."""
+    """Enable paper automation for one symbol, interval and SMA strategy (a new generation), in AI or rule mode."""
     _check_windows(body.short, body.long)
     conn = _paper_conn()
     try:
         sym = body.symbol.upper()
         automation.start(conn, sym, body.timeframe, body.short, body.long, paper_account=PAPER_ACCOUNT,
                          test_account=PAPER_TEST_ACCOUNT, test_starting_cash=PAPER_TEST_STARTING_CASH,
-                         order_size=body.order_size or PAPER_ORDER_SIZE)
+                         order_size=body.order_size or PAPER_ORDER_SIZE, mode=body.mode)
         return _automation_view(conn, sym, body.timeframe, body.short, body.long)
     finally:
         conn.close()
@@ -792,6 +794,75 @@ def automation_trace(decision_id: int) -> dict:
         return automation.trace(conn, decision_id)
     except automation.AutomationError as exc:
         raise HTTPException(404, str(exc)) from None
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------- trading assistant chatbot (Prompt 18)
+
+def _feed_status(symbol: str) -> dict:
+    if not LIVE_FEED:
+        return {"status": "offline", "detail": "LIVE_FEED=off: no Yahoo connection"}
+    feed = hub.feeds.get(symbol)
+    return feed.status() if feed else {"status": "not connected", "detail": "no browser is watching this symbol live"}
+
+
+class AssistantSessionIn(BaseModel):
+    symbol: str = Field(min_length=1, max_length=20)
+    timeframe: Timeframe = "1m"
+    short: int = 5
+    long: int = 20
+
+
+@app.post("/api/assistant/sessions", status_code=201)
+def assistant_start(body: AssistantSessionIn) -> dict:
+    """Start a chat about the symbol on screen (paper account, SIMULATED)."""
+    _check_windows(body.short, body.long)
+    conn = _paper_conn()
+    try:
+        return assistant.start_session(conn, body.symbol.upper(), body.timeframe, body.short, body.long,
+                                       PAPER_ACCOUNT, assistant.make_assistant_provider())
+    finally:
+        conn.close()
+
+
+class AssistantTurnIn(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+
+
+@app.post("/api/assistant/sessions/{session_id}/turns")
+def assistant_ask(session_id: int, body: AssistantTurnIn) -> dict:
+    """Ask anything; for 'what should I do' questions the answer carries a checked paper-account recommendation."""
+    conn = _paper_conn()
+    try:
+        return assistant.ask(conn, session_id, body.text, assistant.make_assistant_provider(), _feed_status)
+    except assistant.AssistantError as exc:
+        raise HTTPException(422, str(exc)) from None
+    finally:
+        conn.close()
+
+
+@app.get("/api/assistant/sessions/{session_id}")
+def assistant_session(session_id: int) -> dict:
+    conn = _paper_conn()
+    try:
+        s = assistant.get_session(conn, session_id)
+        if s is None:
+            raise HTTPException(404, f"no assistant session {session_id}")
+        return s
+    finally:
+        conn.close()
+
+
+@app.post("/api/assistant/turns/{turn_id}/place")
+def assistant_place(turn_id: int) -> dict:
+    """The student's click: re-check and place this answer's recommended paper order (idempotent)."""
+    conn = _paper_conn()
+    try:
+        result = assistant.place_order(conn, turn_id)
+        return {**result, "account": account_state(conn, PAPER_ACCOUNT)}
+    except (assistant.AssistantError, PaperError) as exc:
+        raise HTTPException(422, str(exc)) from None
     finally:
         conn.close()
 

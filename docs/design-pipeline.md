@@ -109,6 +109,8 @@ chartAdapter.js (UTC ISO -> UTCTimestamp) --> CandleChart.vue: candlestick + vol
 | chart_signal scenario comparison (Prompt 16F): 16 scenarios on the TESTSIG fixture through the real panel; outgoing question vs the approved JSON in `prompts/16e…`, context, display vs SQLite vs a hand-written table; test double or `--live` | `backend/compare_chart_signal.py` (reuses `Smoke` services via `backend_env()`), `backend/fixtures.py` (`signal`) | exists |
 | Test-only position override for image-only decisions (`TEST_FEED=on`): empty / open long / open short / unknown, stored as `position_source = TEST override` | `POST /api/test/position`, `backend/image_decisions.py` (`TEST_POSITION`) | exists |
 | Chart-only decision panel with a step-by-step flowchart (Browser / Backend / Model lanes), and stance markers on the main chart | `frontend/src/ImageDecisionPanel.vue`, `CandleChart.vue` (`stances` prop), `chartAdapter.js` (`toStanceMarkers`), `App.vue` | exists |
+| Trading assistant (Prompt 18): side panel chat; Claude in a manual tool-use loop (≤ 6 rounds) over read-only tools (market state, paper account, rule signal, backtest, recent AI decisions) ending in a strict `give_answer`; optional recommendation (action, quantity, model-estimated confidence, reasons with evidence, case against, would change); Python check (cash, shares, quantity, completed candle, data age ≤ `ASSISTANT_STALE_S`, test flag); orders only on the student's click (`origin = 'assistant'`, `request_id = assistant-turn-<id>`); test double | `backend/assistant.py`, `/api/assistant/*`, `frontend/src/AssistantPanel.vue`, `App.vue` (top-bar toggle) | exists |
+| Paper automation rule mode (Prompt 17A): mode `ai` / `rule` chosen at Start; in rule mode `claim_run` → `rule_run` decides from the frozen snapshot (crossover + position) with no image or model; orders get the same pre-fill hooks (`origin = 'automation'`, no decision_id) | `backend/automation.py` (`rule_action`, `rule_run`, `fill_check`), `backend/paper.py`, `POST /api/automation/start` (`mode`), `frontend/src/AutomationPanel.vue` | exists |
 | SMA crossover backtest (Prompt 17): rule-based, long only; decision at candle *i* sees only completed candles up to *i*; fill at the next candle's open; whole shares, fully invested, zero fees; equity at every close; buy-and-hold comparison; drawdown; round trips; interpretation (establishes / uncertain); runs stored | `backend/backtest.py`, `POST/GET /api/backtests*`, `backend/pnl.py` (`apply_fill`, shared with the paper account) | exists |
 | Backtest panel: settings, summary tiles, equity curve with fill markers, orders and fills, round trips, interpretation, earlier runs | `frontend/src/BacktestPanel.vue`, `App.vue` | exists |
 | Backtest fixtures: TESTBT (18 hand-calculated candles) and SYNTHBT (two synthetic sessions, seeded random walk), both `source='test'` | `backend/fixtures.py` (`backtest`, `synthetic`) | exists |
@@ -454,6 +456,14 @@ observations".
 
 Chart captures are PNG files beside the database (`captures/snapshot-<id>-<sha>.png`, ignored by Git).
 
+### Trading assistant (Prompt 18)
+| Table | One row per | Key columns | Uniqueness | Written by |
+|---|---|---|---|---|
+| `assistant_sessions` | chat | `symbol`, `timeframe`, `short`, `long`, `account_id`, `provider`, `model`, `call_kind` (live / mock), `created_ms` | `id` | `assistant.start_session` |
+| `assistant_turns` | question or answer | `session_id`, `role` (user / assistant), `text`, `model`, `latency_ms`, `status` (ok / tool_limit / timeout / provider_error / refusal), `tool_calls_json` (every call with its result), `recommendation_json`, `python_check_json`, `order_id` (set when the student places it) | `id` | `assistant.ask`, `assistant.place_order` |
+
+Assistant orders are ordinary `paper_orders` rows with `origin = 'assistant'` and `request_id = 'assistant-turn-<id>'`.
+
 ### Backtests (Prompt 17)
 | Table | One row per | Key columns | Uniqueness | Written by |
 |---|---|---|---|---|
@@ -466,7 +476,7 @@ Backtests never write the paper tables: the simulated account exists only in the
 ### Automation and voice (Prompts 12–13)
 | Table | One row per | Key columns | Uniqueness | Written by |
 |---|---|---|---|---|
-| `automation_state` | strategy + symbol + interval | `account_id`, `short`, `long`, `order_size`, `enabled`, `generation`, `started_ms`, `stopped_ms` | `key` | `automation.start/stop` |
-| `automation_runs` | analysed candle | `account_id`, `strategy`, `symbol`, `interval`, `candle_ts`, `generation`, `status`, `reason`, `snapshot_id`, `decision_id`, `order_id`, `fill_id` | `UNIQUE (account_id, strategy, symbol, interval, candle_ts)` | `automation` |
+| `automation_state` | strategy + symbol + interval | `account_id`, `short`, `long`, `order_size`, `mode` (ai / rule; 17A), `enabled`, `generation`, `started_ms`, `stopped_ms` | `key` | `automation.start/stop` |
+| `automation_runs` | analysed candle | `account_id`, `strategy`, `symbol`, `interval`, `candle_ts`, `generation`, `status`, `reason`, `snapshot_id`, `decision_id` (NULL in rule mode), `order_id`, `fill_id`, `mode` (17A), `rule_action` (buy / close / hold / wait; 17A) | `UNIQUE (account_id, strategy, symbol, interval, candle_ts)` | `automation` |
 | `voice_sessions` | voice session | `decision_id`, `provider`, `model`, `call_kind`, `summary_text` (the read-only record), `ended_ms`, `end_reason` | `id` | `voice` |
 | `voice_turns` | spoken question or reply | `session_id`, `role`, `text`, `model`, `latency_ms`, `status` | `id` | `voice` |

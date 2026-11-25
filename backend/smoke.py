@@ -19,9 +19,14 @@ What it does
        last step, no order, fill or decision row was added; then a timeout shown on screen with no new marker.
     3. Paper automation with the test clock: buy 4 @ 100, sell 1 @ 110, close 3 @ 105 -> $1,025, 0 shares,
        $25 realized, $0 unrealized; a veto and a duplicate add no fill; after Stop a new candle places no order.
+    3b. Rule-based automation (Prompt 17A) on TESTRULE: switch to Rule, Start; the up crossover buys 2 @ 100 and the
+       down crossover closes 2 @ 50 without any chart capture or model decision; the runs table shows mode "rule".
     4. Backtest (Prompt 17) on the labelled TESTBT fixture, SMA 2/4, $1,000: the summary tiles, the five orders and
        fills and the stored backtest_runs / backtest_fills rows match a hand calculation (fills at the next open);
        the panel labels the data as TEST and lists what the result leaves uncertain.
+    5. Trading assistant (Prompt 18), test double, TESTBT at 15:17:20: open the side panel, ask "Should I buy or sell
+       now?" -> BUY 1 with "can be placed" and no order yet; Place -> one paper order (origin assistant); Place again
+       -> the same order; a general question gets an answer without a recommendation.
 * Writes test-results/smoke-<time>/report.md (and a screenshot, logs and the database on failure), stops the browser
   and every process it started (also on failure), and exits 1 if any expected result is missing.
 
@@ -50,6 +55,7 @@ from backend.recorder import PROJECT_ROOT
 API = "http://127.0.0.1:8000"
 UI = "http://127.0.0.1:5173"
 AUTO = "TESTAUTO"
+RULE = "TESTRULE"                                             # check 3b: rule-based automation
 T0 = datetime(2026, 11, 16, 15, 0, tzinfo=timezone.utc)      # test-clock base for check 3 (a Monday)
 APPROVE_BUY = "action=buy,crossover=up,evidence=sufficient,verdict=accept"
 # Check 4: hand calculation for TESTBT, SMA(2)/SMA(4), $1,000, fill at the next candle's open, whole shares, no fees.
@@ -518,6 +524,62 @@ class Smoke:
                     ["runs"] if r["candle_ts"] >= self.candle(9)])
         self.check(s, "after Stop: no new order", orders_before, self.sql("SELECT count(*) FROM paper_orders")[0][0])
 
+    # ------------------------------------------------------------------ check 3b
+    def wait_rule_run(self, minute: int, statuses: set[str], timeout_s: float = 25) -> dict:
+        deadline, run, ts = time.time() + timeout_s, None, self.candle(60 + minute)
+        while time.time() < deadline:
+            view = self.api("GET", f"/api/automation/status?symbol={RULE}&timeframe=1m&short=2&long=3")
+            run = next((r for r in view["runs"] if r["candle_ts"] == ts), None)
+            if run and run["status"] in statuses:
+                return run
+            time.sleep(0.4)
+        raise SmokeFailure(f"rule run for {ts} did not reach {statuses}; last seen {run}")
+
+    def check_rule_automation(self):
+        s = "3b rule automation"
+        page = self.page
+        at = lambda m, sec: self.at(60 + m, sec)                     # one hour after check 3's test clock
+        for minute, close in enumerate([13, 10, 7, 13, 19]):            # m4: SMA2 16 > SMA3 13 -> up
+            self.price(RULE, close, at(minute, 10))
+        decisions_before = self.sql("SELECT count(*) FROM decisions")[0][0]
+        fills_before = self.fills()
+        page.goto(f"{UI}/?symbol={RULE}&interval=1m")
+        page.get_by_test_id("sma-short").fill("2")
+        page.get_by_test_id("sma-long").fill("3")
+        page.get_by_test_id("sma-apply").click()
+        self.clock(at(4, 20))
+        page.get_by_test_id("auto-mode-rule").check()
+        page.get_by_test_id("auto-order-size").fill("2")
+        page.get_by_test_id("auto-start").click()
+        self.check(s, "running in rule mode", ("Running", "rule"),
+                   (self.wait_text("auto-state", "Running"), self.wait_text("auto-state-mode", "rule")))
+        self.check(s, "rule explained on screen", True, "downward crossover" in self.text("auto-rule-note"))
+
+        self.clock(at(5, 5))
+        buy = self.wait_rule_run(4, {"order_pending"})
+        self.check(s, "up crossover, flat -> buy (rule, no decision)", ("rule", "buy", None),
+                   (buy["mode"], buy["rule_action"], buy["decision_id"]))
+        self.price(RULE, 100, at(5, 10))
+        self.price(RULE, 5, at(5, 50))                                  # m5 close 5: SMA2 12 < SMA3 12.33 -> down
+        self.check(s, "buy filled", fills_before + 1, self.fills())
+
+        self.clock(at(6, 5))
+        close = self.wait_rule_run(5, {"order_pending"})
+        self.check(s, "down crossover, shares held -> close", ("close", None), (close["rule_action"], close["decision_id"]))
+        self.price(RULE, 50, at(6, 10))
+        self.check(s, "close filled", fills_before + 2, self.fills())
+        rows = self.sql("SELECT side, quantity, price FROM paper_fills WHERE symbol = ? ORDER BY id", (RULE,))
+        self.check(s, "fills (SQLite)", [("buy", 2, 100.0), ("close", 2, 50.0)], rows)
+        self.check(s, "no model decision was made", decisions_before, self.sql("SELECT count(*) FROM decisions")[0][0])
+        c4, c5 = self.candle(64), self.candle(65)
+        self.check(s, "runs table on screen (mode, rule action, outcome)",
+                   [("rule", "buy", "filled"), ("rule", "close", "filled")],
+                   [(self.wait_text(f"auto-mode-{c}", "rule"), self.text(f"auto-proposal-{c}"),
+                     self.wait_text(f"auto-outcome-{c}", "filled")) for c in (c4, c5)])
+        self.check(s, "shares on screen after the close", "0", self.wait_text("auto-shares", "0"))
+        page.get_by_test_id("auto-stop").click()
+        self.check(s, "Stopped", "Stopped", self.wait_text("auto-state", "Stopped"))
+
     # ------------------------------------------------------------------ check 4
     def check_backtest(self):
         s = "4 backtest"
@@ -554,6 +616,43 @@ class Smoke:
         self.check(s, "backtest left the paper account alone (no paper fill for TESTBT)", 0,
                    self.sql("SELECT count(*) FROM paper_fills WHERE symbol = ?", (BACKTEST_SYMBOL,))[0][0])
 
+    # ------------------------------------------------------------------ check 5
+    def check_assistant(self):
+        s = "5 assistant"
+        page = self.page
+        self.clock(datetime(2026, 11, 9, 15, 17, 20, tzinfo=timezone.utc))   # TESTBT: 15:16 up crossover, fresh data
+        orders = lambda: self.sql("SELECT count(*) FROM paper_orders WHERE symbol = ? AND origin = 'assistant'",
+                                  (BACKTEST_SYMBOL,))[0][0]
+        page.goto(f"{UI}/?symbol={BACKTEST_SYMBOL}&interval=1m")
+        page.get_by_test_id("sma-short").fill("2")
+        page.get_by_test_id("sma-long").fill("4")
+        page.get_by_test_id("sma-apply").click()
+        page.get_by_test_id("assistant-toggle").click()
+        page.get_by_test_id("assistant-panel").wait_for(state="visible")
+        page.get_by_test_id("assistant-input").fill("Should I buy or sell now?")
+        page.get_by_test_id("assistant-send").click()
+        self.check(s, "recommendation on screen", "BUY 1", self.wait_text("assistant-rec-action", "BUY 1"))
+        self.check(s, "Python check on screen", True, "can be placed" in self.text("assistant-check"))
+        stored = self.sql("SELECT recommendation_json, python_check_json FROM assistant_turns WHERE role = "
+                          "'assistant' ORDER BY id DESC LIMIT 1")
+        rec, chk = (json.loads(stored[0][0]), json.loads(stored[0][1])) if stored else ({}, {})
+        self.check(s, "stored recommendation and check (SQLite)", ("buy", 1, True, True),
+                   (rec.get("action"), rec.get("quantity"), chk.get("actionable"), chk.get("test_data")))
+        self.check(s, "no order before the click", 0, orders())
+        page.get_by_test_id("assistant-place").click()
+        self.check(s, "Place -> one pending buy", True, "buy 1 TESTBT: pending" in
+                   self.wait_text("assistant-place-result", "pending"))
+        self.check(s, "one assistant order (SQLite)", 1, orders())
+        page.get_by_test_id("assistant-place").click()
+        self.check(s, "second click returns the same order", True,
+                   "Already placed" in self.wait_text("assistant-place-result", "Already placed"))
+        self.check(s, "still one assistant order", 1, orders())
+        page.get_by_test_id("assistant-input").fill("What is a stop-loss order?")
+        page.get_by_test_id("assistant-send").click()
+        self.wait_text("assistant-log", "stop-loss order? |")
+        self.check(s, "general question: no new recommendation card", 1,
+                   page.get_by_test_id("assistant-rec").count())
+
     # ------------------------------------------------------------------ run
     def run(self) -> int:
         error = None
@@ -571,7 +670,8 @@ class Smoke:
             console = open(self.out / "browser-console.log", "w")
             self.page.on("console", lambda m: console.write(f"{m.type}: {m.text}\n"))
             for step in (self.check_replay_sma, self.check_ask_about_chart, self.check_image_decision,
-                         self.check_automation, self.check_backtest):
+                         self.check_automation, self.check_rule_automation, self.check_backtest,
+                         self.check_assistant):
                 print(f"- {step.__name__}", flush=True)
                 step()
         except Exception as exc:

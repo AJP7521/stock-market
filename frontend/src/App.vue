@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AskChartPanel from './AskChartPanel.vue'
+import AssistantPanel from './AssistantPanel.vue'
 import AutomationPanel from './AutomationPanel.vue'
 import BacktestPanel from './BacktestPanel.vue'
 import { BackendUnreachable, backendFetch, createPoller } from './backend.js'
@@ -352,6 +353,9 @@ const feedClass = computed(() => ({
   live: 'ok', quiet: 'warn', connecting: 'warn', offline: 'muted',
 }[feed.value?.status] ?? 'bad'))
 
+// Trading assistant side panel (Prompt 18)
+const assistantOpen = ref(false)
+
 // Backtest (Prompt 17): the symbol on the chart (in replay: the recorded symbol being replayed)
 const backtestSymbol = computed(() => (mode.value === 'replay'
   ? (replaySymbol.value.trim().toUpperCase() || symbol.value) : symbol.value))
@@ -428,8 +432,14 @@ onBeforeUnmount(() => {
         <small v-if="health && health.test_feed" class="warn" data-testid="test-feed-on"> · TEST price feed on</small>
         <button type="button" class="link" @click="checkHealth">Check again</button>
       </div>
+
+      <button type="button" class="assistant-toggle" :aria-pressed="assistantOpen" data-testid="assistant-toggle"
+              @click="assistantOpen = !assistantOpen">{{ assistantOpen ? 'Close assistant' : 'Ask assistant' }}</button>
     </div>
   </header>
+
+  <AssistantPanel v-if="backtestSymbol" v-show="assistantOpen" :symbol="backtestSymbol" :timeframe="timeframe"
+                  :sma-short="smaShort" :sma-long="smaLong" @close="assistantOpen = false" />
 
   <dl class="strip" data-testid="live-status">
     <div><dt>Mode</dt><dd data-testid="status-mode">{{ mode === 'replay' ? 'Replay' : 'Live' }}</dd></div>
@@ -612,6 +622,11 @@ onBeforeUnmount(() => {
 <style scoped>
 /* Top bar: wordmark, symbol search, mode switch, backend health */
 .topbar { position: sticky; top: 0; z-index: 10; background: var(--surface); border-bottom: 1px solid var(--border); }
+.assistant-toggle {
+  border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 999px;
+  padding: 6px 14px; font-weight: 600; cursor: pointer;
+}
+.assistant-toggle[aria-pressed="true"] { background: var(--surface); color: var(--accent); }
 .topbar-inner {
   max-width: 1440px; margin: 0 auto; padding: 12px 24px;
   display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
